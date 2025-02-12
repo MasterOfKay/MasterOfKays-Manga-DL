@@ -77,7 +77,18 @@ def get_manga_folder(manga_name: str) -> str:
     return folder_path
 
 def download_chapter(chapter_url: str, chapter_num: str, manga_name: str) -> str:
+    """Download a chapter and create a CBZ file"""
     try:
+        base_dir = os.path.join(os.getcwd(), manga_name)
+        os.makedirs(base_dir, exist_ok=True)
+        
+        cbz_filename = f"Chapter {chapter_num}.cbz"
+        cbz_path = os.path.join(base_dir, cbz_filename)
+        
+        if os.path.exists(cbz_path):
+            print(f"Chapter {chapter_num} already exists, skipping...")
+            return cbz_path
+
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': 'https://asuracomic.net/'
@@ -141,26 +152,24 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str) -> str
                     os.rmdir(temp_dir)
                 return ""
 
-            manga_folder = get_manga_folder(manga_name)
-
-            cbz_filename = os.path.join(manga_folder, f"{manga_name}-Chapter{chapter_num}.cbz")
-            with zipfile.ZipFile(cbz_filename, 'w') as zf:
-                for img_path in image_paths:
-                    zf.write(img_path, os.path.basename(img_path))
+            # Create CBZ file with new naming
+            with zipfile.ZipFile(cbz_path, 'w') as cbz:
+                for idx, img_path in enumerate(image_paths, 1):
+                    img_filename = f"{idx:03d}.jpg"  # Simplified image naming
+                    with open(img_path, 'rb') as img_file:
+                        cbz.writestr(img_filename, img_file.read())
 
             for img_path in image_paths:
                 os.remove(img_path)
             os.rmdir(temp_dir)
 
-            return cbz_filename
+            return cbz_path
             
         finally:
             driver.quit()
             
     except Exception as e:
-        print(f"Error downloading chapter {chapter_num}")
-        if os.path.exists(temp_dir):
-            for file in os.listdir(temp_dir):
-                os.remove(os.path.join(temp_dir, file))
-            os.rmdir(temp_dir)
+        print(f"Error downloading chapter {chapter_num}: {e}")
+        if os.path.exists(cbz_path):
+            os.remove(cbz_path)
         return ""

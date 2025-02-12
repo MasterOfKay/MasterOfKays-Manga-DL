@@ -1,45 +1,94 @@
-Manga Downloader
+# Manga Downloader
 
-This is a small side project to download mangas, currently supporting AssuraComics (MangaKatana comming soon TM). It’s written in Python, and for now, it’s just a simple script.
+A Python-based manga downloader that supports downloading from multiple manga sites for offline reading.
 
-Features
+## Currently Supported Sites
 
-✔ Download manga from AssuraComics
-✔ Save chapters for offline reading
+- [AsuraScans](https://asuracomic.net)
+- [MangaKatana](https://mangakatana.com)
 
-Future Plans (Maybe)
-	•	Support for more sites
-	•	A UI for easier use
+## Features
 
-This project is just for fun, and updates will happen if people want them or if I feel like it.
+- ✔ Download manga chapters from supported sites
+- ✔ Save chapters as CBZ files for offline reading
+- ✔ Selective chapter downloading (single, range, or all)
+- ✔ Automatic manga folder creation and organization
 
-How to Use
-	1.	Install dependencies:
+## Installation
 
+1. Clone this repository or download the ZIP file
+2. Install dependencies:
+```bash
 pip install -r requirements.txt
+```
 
+## Usage
 
-	2.	Run the script:
-
+Run the script:
+```bash
 python dl.py
+```
 
-    3. Insert the link for the Manga (The Main page not the chapter page). After the link you can specyfy wich chapter or chapters you want.
+### Download Examples
 
-    Example:
-    
-    Download all:
-    https://asuracomic.net/series/i-obtained-a-mythic-item-0af32371
+You will be prompted to enter a manga URL and optionally a chapter range. Here are some examples:
 
-    Download just one Chapter:
-    https://asuracomic.net/series/i-obtained-a-mythic-item-0af32371 34
+1. **Download all chapters:**
+```
+https://asuracomic.net/series/i-obtained-a-mythic-item
+```
+or
+```
+https://mangakatana.com/manga/my-gift-lvl-9999-unlimited-gacha
+```
 
-    Downloading just a span of Chapters
-    https://asuracomic.net/series/i-obtained-a-mythic-item-0af32371 53-87
+2. **Download a single chapter:**
+```
+https://asuracomic.net/series/i-obtained-a-mythic-item 34
+```
+This will download only chapter 34
 
-    This Script will then list all the chapters or just the selcted chepters, and will ask if you want to DL them (y/n). If yes it will start and will also create a Folder with the Name of the Manga.
+3. **Download a range of chapters:**
+```
+https://asuracomic.net/series/i-obtained-a-mythic-item 53-87
+```
+This will download chapters 53 through 87
 
-Disclaimer
+The script will then:
+1. List all matching chapters
+2. Ask for confirmation (y/n)
+3. Create a folder with the manga name
+4. Download each chapter as a CBZ file
 
-This tool is for personal use only. Please respect the rights of the content creators.
+### Output Structure
 
-Feel free to open an issue or suggest features, but no promises on updates!
+Downloads will be organized as follows:
+```
+Current Directory/
+└── Manga Name/
+    ├── Chapter 1.cbz
+    ├── Chapter 2.cbz
+    └── Chapter 3.cbz
+```
+
+## Requirements
+
+- Python 3.6+
+- Required packages (installed via requirements.txt):
+  - requests
+  - beautifulsoup4
+
+## Disclaimer
+
+This tool is for personal use only. Please support the content creators by purchasing official releases when available.
+
+## Contributing
+
+Feel free to:
+- Report bugs via issues
+- Suggest new features
+- Submit pull requests
+
+## License
+
+This project is for educational purposes only. Use responsibly and respect copyright laws.
