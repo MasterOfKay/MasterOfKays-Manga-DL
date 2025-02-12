@@ -4,6 +4,9 @@ from assuracomics import get_manga_name as asura_get_manga_name
 from mangakatana import get_chapter_links as katana_get_chapter_links
 from mangakatana import download_chapter as katana_download_chapter
 from mangakatana import get_manga_name as katana_get_manga_name
+from webtoon import get_chapter_links as webtoon_get_chapter_links
+from webtoon import download_chapter as webtoon_download_chapter
+from webtoon import get_manga_name as webtoon_get_manga_name
 import re
 from typing import Optional, Tuple, List
 import os
@@ -12,11 +15,14 @@ def validate_manga_url(url: str) -> Tuple[bool, str]:
     """Validate if the URL is a supported manga URL and return the site type"""
     asura_pattern = r'^https?://asuracomic\.net/series/[a-zA-Z0-9-_]+/?$'
     katana_pattern = r'^https?://mangakatana\.com/manga/[a-zA-Z0-9-_.]+/?$'
+    webtoon_pattern = r'^https?://www\.webtoons\.com/[a-z]{2}/[^/]+/[^/]+/list\?title_no=\d+$'
     
     if re.match(asura_pattern, url):
         return True, "asura"
     elif re.match(katana_pattern, url):
         return True, "katana"
+    elif re.match(webtoon_pattern, url):
+        return True, "webtoon"
     return False, ""
 
 def parse_chapter_range(range_str: Optional[str]) -> Tuple[float, float]:
@@ -52,8 +58,10 @@ def download_chapters(chapters: List[Tuple[str, str, str]], manga_name: str, sit
         print(f"\nProcessing Chapter {chapter_num}")
         if site_type == "asura":
             cbz_file = asura_download_chapter(chapter_url, chapter_num, manga_name)
-        else:  # site_type == "katana"
+        elif site_type == "katana":
             cbz_file = katana_download_chapter(chapter_url, chapter_num, manga_name)
+        else:  # site_type == "webtoon"
+            cbz_file = webtoon_download_chapter(chapter_url, chapter_num, manga_name)
         
         if cbz_file:
             rel_path = os.path.relpath(cbz_file)
@@ -67,16 +75,19 @@ def main():
 
     is_valid, site_type = validate_manga_url(url)
     if not is_valid:
-        print("Error: Unsupported website. Currently supported: asuracomic.net, mangakatana.com")
+        print("Error: Unsupported website. Currently supported: asuracomic.net, mangakatana.com, webtoons.com")
         return
 
     print("\nFetching chapters...")
     if site_type == "asura":
         chapters = asura_get_chapter_links(url)
         manga_name = asura_get_manga_name(url)
-    else:  # site_type == "katana"
+    elif site_type == "katana":
         chapters = katana_get_chapter_links(url)
         manga_name = katana_get_manga_name(url)
+    else:  # site_type == "webtoon"
+        chapters = webtoon_get_chapter_links(url)
+        manga_name = webtoon_get_manga_name(url)
 
     if chapters:
         start_ch, end_ch = parse_chapter_range(chapter_range)

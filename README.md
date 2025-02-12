@@ -6,13 +6,14 @@ A Python-based manga downloader that supports downloading from multiple manga si
 
 - [AsuraScans](https://asuracomic.net)
 - [MangaKatana](https://mangakatana.com)
+- [Webtoon](https://www.webtoons.com)
 
 ## Features
 
 - ✔ Download manga chapters from supported sites
 - ✔ Save chapters as CBZ files for offline reading
 - ✔ Selective chapter downloading (single, range, or all)
-- ✔ Automatic manga folder creation and organization
+- ✔ Multi-language support for Webtoon
 
 ## Installation
 
@@ -41,6 +42,10 @@ or
 ```
 https://mangakatana.com/manga/my-gift-lvl-9999-unlimited-gacha
 ```
+or
+```
+https://www.webtoons.com/de/romance/hot-guy-and-a-beast/list?title_no=4374
+```
 
 2. **Download a single chapter:**
 ```
@@ -50,9 +55,9 @@ This will download only chapter 34
 
 3. **Download a range of chapters:**
 ```
-https://asuracomic.net/series/i-obtained-a-mythic-item 53-87
+https://www.webtoons.com/de/romance/hot-guy-and-a-beast/list?title_no=4374 5-10
 ```
-This will download chapters 53 through 87
+This will download chapters 5 through 10
 
 The script will then:
 1. List all matching chapters
