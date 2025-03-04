@@ -76,8 +76,9 @@ def get_manga_folder(manga_name: str) -> str:
     
     return folder_path
 
-def download_chapter(chapter_url: str, chapter_num: str, manga_name: str) -> str:
-    """Download a chapter and create a CBZ file"""
+
+def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, progress_callback=None) -> str:
+    """Download a chapter and create a CBZ file with progress reporting"""
     try:
         base_dir = os.path.join(os.getcwd(), manga_name)
         os.makedirs(base_dir, exist_ok=True)
@@ -121,7 +122,8 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str) -> str
                 print("No chapter images found")
                 return ""
 
-            print(f"Found {len(images)} pages")
+            total_images = len(images)
+            print(f"Found {total_images} pages")
 
             temp_dir = f"temp_chapter_{chapter_num}"
             os.makedirs(temp_dir, exist_ok=True)
@@ -142,6 +144,10 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str) -> str
                     with open(img_path, 'wb') as f:
                         f.write(img_response.content)
                     image_paths.append(img_path)
+                    
+                    if progress_callback:
+                        progress_callback(i, total_images)
+                        
                 except Exception as e:
                     print(f"Error downloading page {i}")
                     continue
@@ -155,7 +161,7 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str) -> str
             # Create CBZ file with new naming
             with zipfile.ZipFile(cbz_path, 'w') as cbz:
                 for idx, img_path in enumerate(image_paths, 1):
-                    img_filename = f"{idx:03d}.jpg"  # Simplified image naming
+                    img_filename = f"{idx:03d}.jpg"
                     with open(img_path, 'rb') as img_file:
                         cbz.writestr(img_filename, img_file.read())
 

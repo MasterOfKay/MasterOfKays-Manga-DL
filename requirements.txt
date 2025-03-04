@@ -1,3 +1,5 @@
-requests
-beautifulsoup4
-selenium
+# Required packages for Manga Downloader
+requests>=2.25.0
+beautifulsoup4>=4.9.3
+PyQt5>=5.15.0
+selenium>=4.0.0

@@ -1,0 +1,54 @@
+
+# Debug and log files
+debug_downloader.py
+manga_download.log
+*.log
+build_exe.py
+
+# Downloaded manga files
+*.cbz
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Manga download directories
+# Ignore all directories except those that are clearly part of the project
+*/
+!*/.*
+!*/__pycache__
+!.github/
+!tests/
+
+# Keep specific project directories (add more as needed)
+!docs/
+!examples/
