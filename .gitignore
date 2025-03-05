@@ -35,6 +35,9 @@ venv/
 ENV/
 env/
 
+# ignore the .exe
+*.exe
+
 # IDE specific files
 .idea/
 .vscode/

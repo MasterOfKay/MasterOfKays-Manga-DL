@@ -77,18 +77,31 @@ def get_manga_folder(manga_name: str) -> str:
     return folder_path
 
 
-def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, progress_callback=None) -> str:
-    """Download a chapter and create a CBZ file with progress reporting"""
+def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_path: str = None, progress_callback=None) -> str:
+    """Download a chapter and create a CBZ file with progress reporting and robust error handling"""
     try:
-        base_dir = os.path.join(os.getcwd(), manga_name)
+        chapter_num = str(chapter_num).strip()
+        
+        safe_manga_name = ''.join(c for c in manga_name if c not in '/:*?"<>|')
+        if not safe_manga_name:
+            safe_manga_name = manga_name
+        
+        if base_path is None or not os.path.isdir(base_path):
+            base_path = os.getcwd()
+        
+        base_dir = os.path.join(base_path, safe_manga_name)
         os.makedirs(base_dir, exist_ok=True)
         
         cbz_filename = f"Chapter {chapter_num}.cbz"
         cbz_path = os.path.join(base_dir, cbz_filename)
         
         if os.path.exists(cbz_path):
-            print(f"Chapter {chapter_num} already exists, skipping...")
-            return cbz_path
+            if os.path.getsize(cbz_path) > 0:
+                print(f"Chapter {chapter_num} already exists, skipping...")
+                return cbz_path
+            else:
+                print(f"Found empty file for Chapter {chapter_num}, removing and redownloading...")
+                os.remove(cbz_path)
 
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -97,14 +110,36 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, progre
 
         options = Options()
         options.add_argument('--headless')
-        driver = webdriver.Firefox(options=options)
         
         try:
-            driver.get(chapter_url)
+            driver = webdriver.Firefox(options=options)
+        except Exception as e:
+            print(f"Failed to create Firefox driver: {e}")
+            try:
+                from selenium.webdriver.chrome.options import Options as ChromeOptions
+                chrome_options = ChromeOptions()
+                chrome_options.add_argument('--headless')
+                driver = webdriver.Chrome(options=chrome_options)
+            except Exception as chrome_err:
+                print(f"Failed to create Chrome driver as well: {chrome_err}")
+                return ""
+        
+        try:
+            driver.set_page_load_timeout(30)
+            
+            try:
+                driver.get(chapter_url)
+            except Exception as page_error:
+                print(f"Error loading page {chapter_url}: {page_error}")
+                return ""
 
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "w-full.mx-auto.center"))
-            )
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "w-full.mx-auto.center"))
+                )
+            except Exception as wait_error:
+                print(f"Timeout waiting for chapter images: {wait_error}")
+                print("Attempting to parse page despite timeout...")
 
             soup = BeautifulSoup(driver.page_source, 'html.parser')
 
@@ -119,20 +154,38 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, progre
                         images.append(src)
             
             if not images:
-                print("No chapter images found")
+                print(f"No images found for chapter {chapter_num}, URL: {chapter_url}")
+                print("Page source contains limited HTML for debugging:", driver.page_source[:500])
                 return ""
 
             total_images = len(images)
-            print(f"Found {total_images} pages")
+            print(f"Found {total_images} pages for chapter {chapter_num}")
 
-            temp_dir = f"temp_chapter_{chapter_num}"
+            import uuid
+            temp_dir = f"temp_chapter_{chapter_num}_{uuid.uuid4().hex[:8]}"
             os.makedirs(temp_dir, exist_ok=True)
 
             image_paths = []
+            
+            if progress_callback:
+                progress_callback(0, total_images)
+            
             for i, img_url in enumerate(images, 1):
                 try:
-                    img_response = requests.get(img_url, headers=headers)
-                    img_response.raise_for_status()
+                    max_retries = 3
+                    for retry in range(max_retries):
+                        try:
+                            img_response = requests.get(img_url, headers=headers, timeout=15)
+                            img_response.raise_for_status()
+                            break
+                        except Exception as img_error:
+                            if retry < max_retries - 1:
+                                print(f"Retry {retry+1}/{max_retries} for image {i}")
+                                import time
+                                time.sleep(1)
+                            else:
+                                print(f"Failed to download image {i} after {max_retries} attempts: {img_error}")
+                                raise
                     
                     img_ext = os.path.splitext(img_url.split('?')[0])[1]
                     if not img_ext or img_ext.lower() not in ['.jpg', '.jpeg', '.png', '.webp']:
@@ -149,33 +202,52 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, progre
                         progress_callback(i, total_images)
                         
                 except Exception as e:
-                    print(f"Error downloading page {i}")
+                    print(f"Error downloading page {i}: {e}")
                     continue
 
             if not image_paths:
                 print("Failed to download any images")
                 if os.path.exists(temp_dir):
-                    os.rmdir(temp_dir)
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 return ""
 
-            # Create CBZ file with new naming
-            with zipfile.ZipFile(cbz_path, 'w') as cbz:
-                for idx, img_path in enumerate(image_paths, 1):
-                    img_filename = f"{idx:03d}.jpg"
-                    with open(img_path, 'rb') as img_file:
-                        cbz.writestr(img_filename, img_file.read())
+            try:
+                with zipfile.ZipFile(cbz_path, 'w') as cbz:
+                    for idx, img_path in enumerate(image_paths, 1):
+                        img_filename = f"{idx:03d}.jpg"
+                        with open(img_path, 'rb') as img_file:
+                            cbz.writestr(img_filename, img_file.read())
+            except Exception as zip_error:
+                print(f"Error creating CBZ file: {zip_error}")
+                if os.path.exists(cbz_path):
+                    os.remove(cbz_path)
+                return ""
 
             for img_path in image_paths:
-                os.remove(img_path)
-            os.rmdir(temp_dir)
+                try:
+                    if os.path.exists(img_path):
+                        os.remove(img_path)
+                except Exception as rm_error:
+                    print(f"Error removing temp file {img_path}: {rm_error}")
+            
+            try:
+                if os.path.exists(temp_dir):
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception as rm_dir_error:
+                print(f"Error removing temp directory: {rm_dir_error}")
 
             return cbz_path
             
         finally:
-            driver.quit()
+            try:
+                driver.quit()
+            except:
+                pass
             
     except Exception as e:
         print(f"Error downloading chapter {chapter_num}: {e}")
-        if os.path.exists(cbz_path):
+        if 'cbz_path' in locals() and os.path.exists(cbz_path):
             os.remove(cbz_path)
         return ""

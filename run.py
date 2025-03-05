@@ -62,11 +62,14 @@ def main():
         print("\nRequired dependencies not found. Please install them with:")
         print("pip install -r requirements.txt")
         return
-    
-    if os.path.exists("manga_downloader_gui.py") and has_pyqt:
+
+    if os.path.exists("gui.py") and has_pyqt:
         print("Found PyQt5. Starting GUI version...")
-        launch_gui_without_console()
-        print("\nGUI started! You can close this window.")
+        if platform.system() == 'Windows':
+            subprocess.Popen(["pythonw", "gui.py"], 
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            subprocess.Popen(["python3", "gui.py"])
     elif os.path.exists("enhanced_dl.py"):
         print("Starting enhanced CLI version...")
         os.system(f"{sys.executable} enhanced_dl.py")

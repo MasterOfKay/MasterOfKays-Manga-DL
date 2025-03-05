@@ -1,4 +1,4 @@
-# Manga Downloader
+# MasterOfKay's Manga Downloader
 
 A Python-based manga downloader that supports downloading from multiple manga sites for offline reading.
 
@@ -17,6 +17,7 @@ A Python-based manga downloader that supports downloading from multiple manga si
 - ✔ Multiple user interfaces (GUI and CLI)
 - ✔ Download queue management
 - ✔ Pause and resume downloads
+- ✔ Custom download path selection
 - ✔ Multi-language support for Webtoon
 
 ## Installation
@@ -56,7 +57,7 @@ python run.py
 
 ### Available Interfaces
 
-#### GUI Interface (manga_downloader_gui.py)
+#### GUI Interface (gui.py)
 
 The GUI interface provides:
 - Easy-to-use form for entering manga URLs
@@ -65,10 +66,20 @@ The GUI interface provides:
 - Pause/resume functionality
 - Chapter download progress tracking
 - Chapter list viewer
+- **Custom download location** - Choose where your manga chapters are saved
 
 ```bash
-python manga_downloader_gui.py
+python gui.py
 ```
+
+##### Setting Custom Download Path
+
+You can now specify where you want your manga downloads to be saved:
+1. Use the "Save Path" field to view or edit the current download path
+2. Click "Browse..." to select a folder using the file explorer
+3. Your chosen path will be remembered between application restarts
+
+> **Technical Note**: The download path configuration is stored in `~/.mangadownloader/config.txt` on Linux/Mac and `C:\Users\<username>\.mangadownloader\config.txt` on Windows.
 
 #### Enhanced CLI (enhanced_dl.py)
 
@@ -120,9 +131,18 @@ https://www.webtoons.com/de/romance/hot-guy-and-a-beast/list?title_no=4374 5-10
 
 ### Output Structure
 
-Downloads will be organized as follows:
+By default, downloads will be organized as follows:
 ```
 Current Directory/
+└── Manga Name/
+    ├── Chapter 1.cbz
+    ├── Chapter 2.cbz
+    └── Chapter 3.cbz
+```
+
+When using a custom path, the structure will be:
+```
+Your Selected Path/
 └── Manga Name/
     ├── Chapter 1.cbz
     ├── Chapter 2.cbz

@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                             QProgressBar, QScrollArea, QFrame, QMessageBox,
                             QTabWidget, QListWidget, QListWidgetItem, QDialog,
-                            QCheckBox, QSpinBox, QGridLayout, QAction)
+                            QCheckBox, QSpinBox, QGridLayout, QAction, QFileDialog)
 from PyQt5.QtCore import Qt, QObject, pyqtSignal, QTimer, QEvent
 from PyQt5.QtGui import QFont, QColor, QMouseEvent
 
@@ -25,6 +25,15 @@ from mangakatana import get_manga_name as katana_get_manga_name
 from webtoon import get_chapter_links as webtoon_get_chapter_links
 from webtoon import download_chapter as webtoon_download_chapter
 from webtoon import get_manga_name as webtoon_get_manga_name
+
+import traceback
+import logging
+
+logging.basicConfig(
+    filename='manga_download.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 class DownloadSignals(QObject):
     manga_started = pyqtSignal(str)
@@ -51,6 +60,7 @@ class DownloadManager:
         self.cancel_requested = set()
         self.paused_downloads = set()
         self.download_queue_list = []
+        self.download_path = os.getcwd()
     
     def validate_manga_url(self, url: str) -> Tuple[bool, str]:
         """Validate if the URL is a supported manga URL and return the site type"""
@@ -140,9 +150,10 @@ class DownloadManager:
                     url, site_type, chapter_range = self.download_queue.get(block=False)
                     
                     manga_name = self._get_manga_name(url, site_type)
+                    logging.info(f"Processing manga: {manga_name} from {site_type}")
                     
                     if manga_name in self.paused_downloads:
-                        print(f"Skipping paused manga: {manga_name}")
+                        logging.info(f"Skipping paused manga: {manga_name}")
                         self.download_queue.put((url, site_type, chapter_range))
                         self.download_queue.task_done()
                         time.sleep(0.5)
@@ -152,6 +163,7 @@ class DownloadManager:
                     
                     chapters = self._get_chapters(url, site_type)
                     if not chapters:
+                        logging.warning(f"No chapters found for manga: {manga_name}")
                         self.signals.manga_failed.emit(manga_name, "No chapters found for this manga")
                         self.download_queue.task_done()
                         continue
@@ -160,61 +172,96 @@ class DownloadManager:
                         filtered_chapters = chapter_range
                         
                         if not filtered_chapters:
+                            logging.warning(f"No valid chapters in selected range for {manga_name}")
                             self.signals.manga_failed.emit(manga_name, "No valid chapters in the selected range")
                             self.download_queue.task_done()
                             continue
                         
                         chapters = filtered_chapters
                     
+                    logging.info(f"Processing {len(chapters)} chapters for {manga_name}")
+                    
+                    try:
+                        chapters.sort(key=lambda x: float(x[0]) if x[0].replace('.', '', 1).isdigit() else x[0])
+                        logging.info(f"Successfully sorted chapters for {manga_name}")
+                    except Exception as sort_error:
+                        logging.warning(f"Error sorting chapters: {sort_error}, using original order")
+                    
                     successful_chapters = 0
                     total_chapters = len(chapters)
+                    
                     for idx, (chapter_num, chapter_name, chapter_url) in enumerate(chapters):
-                        if manga_name in self.cancel_requested:
-                            self.cancel_requested.remove(manga_name)
-                            self.signals.download_cancelled.emit(manga_name)
-                            break
-                        
-                        if manga_name in self.paused_downloads:
-                            remaining_chapters = chapters[idx:]
-                            self.download_queue.put((url, site_type, remaining_chapters))
-                            self.signals.download_paused.emit(manga_name)
-                            break
-                        
-                        self.signals.chapter_started.emit(manga_name, chapter_num)
-                        
                         try:
-                            cbz_path = self._download_chapter(chapter_url, chapter_num, manga_name, site_type)
+                            logging.info(f"Processing chapter {chapter_num} ({idx+1}/{total_chapters})")
                             
-                            if cbz_path:
-                                self.signals.chapter_completed.emit(manga_name, chapter_num, cbz_path)
+                            if manga_name in self.cancel_requested:
+                                logging.info(f"Download cancelled for {manga_name}")
+                                self.cancel_requested.remove(manga_name)
+                                self.signals.download_cancelled.emit(manga_name)
+                                break
+                            
+                            if manga_name in self.paused_downloads:
+                                logging.info(f"Download paused for {manga_name}")
+                                remaining_chapters = chapters[idx:]
+                                self.download_queue.put((url, site_type, remaining_chapters))
+                                self.signals.download_paused.emit(manga_name)
+                                break
+                            
+                            self.signals.chapter_started.emit(manga_name, chapter_num)
+
+                            chapter_path = os.path.join(self.download_path, manga_name, f"Chapter {chapter_num}.cbz")
+                            if os.path.exists(chapter_path) and os.path.getsize(chapter_path) > 0:
+                                logging.info(f"Chapter {chapter_num} already exists, skipping download")
+                                self.signals.chapter_completed.emit(manga_name, chapter_num, chapter_path)
                                 successful_chapters += 1
                             else:
-                                self.signals.chapter_failed.emit(manga_name, chapter_num, "Download failed - no file created")
+                                cbz_path = self._download_chapter(chapter_url, chapter_num, manga_name, site_type)
+                                
+                                if cbz_path and os.path.exists(cbz_path) and os.path.getsize(cbz_path) > 0:
+                                    self.signals.chapter_completed.emit(manga_name, chapter_num, cbz_path)
+                                    successful_chapters += 1
+                                else:
+                                    error_msg = "Download failed - chapter may not exist or download failed"
+                                    logging.warning(f"Chapter {chapter_num}: {error_msg}")
+                                    self.signals.chapter_failed.emit(manga_name, chapter_num, error_msg)
+                            
+                            manga_progress = int((idx + 1) / total_chapters * 100)
+                            self.signals.manga_progress.emit(manga_name, manga_progress)
+                            
                         except Exception as chapter_error:
-                            error_message = f"Failed to download: {str(chapter_error)}"
+                            error_message = f"Failed to process chapter {chapter_num}: {str(chapter_error)}"
+                            logging.error(error_message)
+                            logging.error(traceback.format_exc())
                             self.signals.chapter_failed.emit(manga_name, chapter_num, error_message)
-                        
-                        manga_progress = int((idx + 1) / total_chapters * 100)
-                        self.signals.manga_progress.emit(manga_name, manga_progress)
+                            
+                            manga_progress = int((idx + 1) / total_chapters * 100)
+                            self.signals.manga_progress.emit(manga_name, manga_progress)
                     
                     if (manga_name not in self.cancel_requested and 
-                        manga_name not in self.paused_downloads and 
-                        successful_chapters > 0):
-                        if successful_chapters == len(chapters):
-                            self.signals.manga_completed.emit(manga_name)
+                        manga_name not in self.paused_downloads):
+                        if successful_chapters > 0:
+                            if successful_chapters == len(chapters):
+                                logging.info(f"All chapters downloaded successfully for {manga_name}")
+                                self.signals.manga_completed.emit(manga_name)
+                            else:
+                                logging.info(f"Partial download for {manga_name}: {successful_chapters}/{len(chapters)}")
+                                self.signals.manga_completed.emit(f"{manga_name} (Partial: {successful_chapters}/{len(chapters)})")
                         else:
-                            self.signals.manga_completed.emit(f"{manga_name} (Partial: {successful_chapters}/{len(chapters)})")
-                    elif successful_chapters == 0 and manga_name not in self.cancel_requested and manga_name not in self.paused_downloads:
-                        self.signals.manga_failed.emit(manga_name, "All chapters failed to download")
+                            logging.warning(f"All chapters failed to download for {manga_name}")
+                            self.signals.manga_failed.emit(manga_name, "All chapters failed to download")
                     
                 except Exception as manga_error:
                     if 'manga_name' in locals():
+                        logging.error(f"Error processing manga {manga_name}: {manga_error}")
+                        logging.error(traceback.format_exc())
                         self.signals.manga_failed.emit(manga_name, f"Error: {str(manga_error)}")
                     else:
+                        logging.error(f"Error processing manga (unknown): {manga_error}")
+                        logging.error(traceback.format_exc())
                         self.signals.show_toast.emit(f"Error processing manga: {str(manga_error)}", "error")
                 
                 finally:
-                    if not self.download_queue.empty() or 'manga_name' in locals() and manga_name in self.paused_downloads:
+                    if not self.download_queue.empty() or ('manga_name' in locals() and manga_name in self.paused_downloads):
                         if 'manga_name' not in locals() or manga_name not in self.paused_downloads:
                             self.download_queue.task_done()
                     else:
@@ -226,6 +273,8 @@ class DownloadManager:
                 self.signals.queue_updated.emit()
                 break
             except Exception as e:
+                logging.critical(f"Critical error in queue processing: {e}")
+                logging.critical(traceback.format_exc())
                 self.signals.show_toast.emit(f"Queue processing error: {str(e)}", "error")
                 self.running = False
                 break
@@ -249,37 +298,63 @@ class DownloadManager:
         return []
     
     def _download_chapter(self, chapter_url, chapter_num, manga_name, site_type):
-        """Enhanced download method with better progress reporting"""
+        """Enhanced download method with robust file checking and error handling"""
         if manga_name in self.cancel_requested:
             return ""
         
         self.signals.chapter_progress.emit(manga_name, chapter_num, 0)
         
         try:
+            chapter_path = os.path.join(self.download_path, manga_name, f"Chapter {chapter_num}.cbz")
+            logging.info(f"Checking if chapter exists: {chapter_path}")
+            
+            try:
+                if os.path.exists(chapter_path) and os.path.getsize(chapter_path) > 0:
+                    logging.info(f"Chapter {chapter_num} already exists at {chapter_path}")
+                    self.signals.chapter_progress.emit(manga_name, chapter_num, 100)
+                    return chapter_path
+            except Exception as check_err:
+                logging.error(f"Error checking if chapter exists: {check_err}")
+            
+            logging.info(f"Starting download for chapter {chapter_num} from {site_type}")
+            
             if site_type == "asura":
                 def progress_callback(current, total):
-                    progress = int((current / total) * 100)
+                    if total <= 0:
+                        progress = 0
+                    else:
+                        progress = int((current / total) * 100)
                     self.signals.chapter_progress.emit(manga_name, chapter_num, progress)
                     
                 cbz_path = asura_download_chapter(chapter_url, chapter_num, manga_name, 
+                                                  self.download_path,
                                                   progress_callback=progress_callback)
             elif site_type == "katana":
                 self.signals.chapter_progress.emit(manga_name, chapter_num, 20)
-                cbz_path = katana_download_chapter(chapter_url, chapter_num, manga_name)
+                cbz_path = katana_download_chapter(chapter_url, chapter_num, manga_name, 
+                                                   self.download_path)
                 self.signals.chapter_progress.emit(manga_name, chapter_num, 90)
             elif site_type == "webtoon":
                 self.signals.chapter_progress.emit(manga_name, chapter_num, 20)
-                cbz_path = webtoon_download_chapter(chapter_url, chapter_num, manga_name)
+                cbz_path = webtoon_download_chapter(chapter_url, chapter_num, manga_name,
+                                                    self.download_path)
                 self.signals.chapter_progress.emit(manga_name, chapter_num, 90)
             else:
+                logging.error(f"Unknown site type: {site_type}")
                 return ""
-               
-            self.signals.chapter_progress.emit(manga_name, chapter_num, 100)
             
-            return cbz_path
-            
+            if cbz_path and os.path.exists(cbz_path) and os.path.getsize(cbz_path) > 0:
+                logging.info(f"Successfully downloaded chapter {chapter_num} to {cbz_path}")
+                self.signals.chapter_progress.emit(manga_name, chapter_num, 100)
+                return cbz_path
+            else:
+                logging.warning(f"Download complete but file not found or empty: {cbz_path}")
+                return ""
+                
         except Exception as e:
-            print(f"Error downloading chapter {chapter_num}: {str(e)}")
+            logging.error(f"Error downloading chapter {chapter_num}: {str(e)}")
+            logging.error(traceback.format_exc())
+            self.signals.chapter_progress.emit(manga_name, chapter_num, 0)
             return ""
     
     def _track_download_progress(self, download_func, chapter_url, chapter_num, manga_name, site_type):
@@ -320,6 +395,13 @@ class DownloadManager:
                 raise ValueError
         except ValueError:
             return (0, float('inf'))
+
+    def set_download_path(self, path):
+        """Set the download path for manga chapters"""
+        if os.path.isdir(path):
+            self.download_path = path
+            return True
+        return False
 
 class Toast(QDialog):
     def __init__(self, parent=None):
@@ -535,7 +617,7 @@ class ChapterSelectionDialog(QDialog):
         start = self.range_start.value() - 1
         end = self.range_end.value() - 1
         
-        for i, cb in enumerate(self.chapter_checkboxes):
+        for i, cb in self.chapter_checkboxes:
             cb.setChecked(start <= i <= end)
     
     def get_selected_chapters(self):
@@ -655,7 +737,6 @@ class DownloadListItemWidget(QWidget):
                 }
             """)
         else:
-            # Show pause icon
             self.pause_btn.setText("⏸")
             self.pause_btn.setStyleSheet("""
                 QPushButton {
@@ -734,8 +815,13 @@ class MangaDownloaderApp(QMainWindow):
         self.setWindowTitle("Manga Downloader")
         self.resize(800, 600)
         
+        self.download_path = os.path.abspath(os.getcwd())
+        self.load_download_path()
+        
         self.signals = DownloadSignals()
         self.download_manager = DownloadManager(self.signals)
+        
+        self.download_manager.download_path = self.download_path
         
         self.signals.manga_started.connect(self.on_manga_started)
         self.signals.manga_completed.connect(self.on_manga_completed)
@@ -777,6 +863,20 @@ class MangaDownloaderApp(QMainWindow):
         url_layout.addWidget(self.url_input)
         url_layout.addWidget(download_btn)
         main_layout.addLayout(url_layout)
+        
+        path_layout = QHBoxLayout()
+        path_label = QLabel("Save Path:")
+        self.path_input = QLineEdit(self.download_path)
+        self.path_input.setPlaceholderText("Path where manga will be saved")
+        self.path_input.textChanged.connect(self.on_path_changed)
+        
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.browse_for_path)
+        
+        path_layout.addWidget(path_label)
+        path_layout.addWidget(self.path_input)
+        path_layout.addWidget(browse_btn)
+        main_layout.addLayout(path_layout)
         
         tabs = QTabWidget()
         
@@ -839,7 +939,7 @@ class MangaDownloaderApp(QMainWindow):
             self,
             "About MasterOfKay's Manga Downloader",
             """
-            <h3>MasterOfKay's Manga Downloader v1.1</h3>
+            <h3>MasterOfKay's Manga Downloader v1.2</h3>
             <p>Download manga from popular sites.</p>
             <p>Supported sites:</p>
             <ul>
@@ -1127,7 +1227,12 @@ class MangaDownloaderApp(QMainWindow):
         self.update_chapter_status(manga_name, chapter_num, "Completed", 100, path)
     
     def on_chapter_failed(self, manga_name, chapter_num, reason):
+        """Handle a failed chapter download with proper error messaging"""
+        print(f"Chapter failed: {manga_name} - Chapter {chapter_num} - {reason}")
         self.update_chapter_status(manga_name, chapter_num, "Failed")
+        
+        if "doesn't exist" not in reason.lower() and "no file created" not in reason.lower():
+            self.show_toast(f"Failed to download {manga_name} Chapter {chapter_num}: {reason}", "error")
     
     def on_manga_progress(self, manga_name, progress):
         """Update manga overall progress"""
@@ -1187,6 +1292,52 @@ class MangaDownloaderApp(QMainWindow):
             self.show_toast("History saved", "success")
         except Exception as e:
             self.show_toast(f"Error saving history: {str(e)}", "error")
+    
+    def browse_for_path(self):
+        """Open file dialog to select download directory"""
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Download Folder",
+            self.download_path,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        )
+        
+        if path:
+            self.download_path = path
+            self.path_input.setText(path)
+            self.save_download_path()
+            self.download_manager.download_path = self.download_path
+
+    def on_path_changed(self, path):
+        """Handle when user types or pastes a path"""
+        if os.path.isdir(path):
+            self.download_path = path
+            self.save_download_path()
+            self.download_manager.download_path = self.download_path
+
+    def save_download_path(self):
+        """Save download path to a config file"""
+        config_dir = os.path.join(os.path.expanduser("~"), ".mangadownloader")
+        os.makedirs(config_dir, exist_ok=True)
+        
+        config_path = os.path.join(config_dir, "config.txt")
+        with open(config_path, "w") as f:
+            f.write(f"download_path={self.download_path}")
+
+    def load_download_path(self):
+        """Load download path from config if available"""
+        config_path = os.path.join(os.path.expanduser("~"), ".mangadownloader", "config.txt")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    for line in f:
+                        if line.startswith("download_path="):
+                            path = line.strip().split("=", 1)[1]
+                            if os.path.isdir(path):
+                                self.download_path = path
+                                break
+            except Exception as e:
+                print(f"Error loading config: {e}")
 
 def main():
     app = QApplication(sys.argv)

@@ -96,20 +96,34 @@ def get_chapter_links(url: str) -> List[Tuple[str, str, str]]:
         logger.exception(f"Error fetching chapters: {e}")
         return []
 
-def download_chapter(chapter_url: str, chapter_num: str, manga_name: str) -> str:
-    """Download a chapter and create a CBZ file using more robust methods"""
-    logger.info(f"Starting download of {manga_name} chapter {chapter_num}")
-    
-    base_dir = os.path.join(os.getcwd(), manga_name)
-    os.makedirs(base_dir, exist_ok=True)
-    cbz_filename = f"Chapter {chapter_num}.cbz"
-    cbz_path = os.path.join(base_dir, cbz_filename)
-
-    if os.path.exists(cbz_path):
-        logger.info(f"Chapter {chapter_num} already exists, skipping...")
-        return cbz_path
-
+def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_path: str = None) -> str:
+    """Download a MangaKatana chapter and create a CBZ file with robust error handling"""
     try:
+        chapter_num = str(chapter_num).strip()
+        
+        safe_manga_name = ''.join(c for c in manga_name if c not in '/:*?"<>|')
+        if not safe_manga_name:
+            safe_manga_name = manga_name
+        
+        if base_path is None or not os.path.isdir(base_path):
+            base_path = os.getcwd()
+        
+        base_dir = os.path.join(base_path, safe_manga_name)
+        os.makedirs(base_dir, exist_ok=True)
+        
+        cbz_filename = f"Chapter {chapter_num}.cbz"
+        cbz_path = os.path.join(base_dir, cbz_filename)
+        
+        if os.path.exists(cbz_path):
+            if os.path.getsize(cbz_path) > 0:
+                print(f"Chapter {chapter_num} already exists, skipping...")
+                return cbz_path
+            else:
+                print(f"Found empty file for Chapter {chapter_num}, removing and redownloading...")
+                os.remove(cbz_path)
+        
+        logger.info(f"Starting download of {manga_name} chapter {chapter_num}")
+    
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
