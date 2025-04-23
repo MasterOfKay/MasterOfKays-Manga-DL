@@ -4,13 +4,16 @@ import threading
 import queue
 from typing import Dict, List, Tuple
 import re
+import json
+from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                             QProgressBar, QScrollArea, QFrame, QMessageBox,
                             QTabWidget, QListWidget, QListWidgetItem, QDialog,
-                            QCheckBox, QSpinBox, QGridLayout, QAction, QFileDialog)
-from PyQt5.QtCore import Qt, QObject, pyqtSignal, QTimer, QEvent
-from PyQt5.QtGui import QFont, QColor, QMouseEvent
+                            QCheckBox, QSpinBox, QGridLayout, QAction, QFileDialog,
+                            QSplitter, QToolButton, QMenu, QSizePolicy, QStackedWidget)
+from PyQt5.QtCore import Qt, QObject, pyqtSignal, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve
+from PyQt5.QtGui import QFont, QColor, QMouseEvent, QIcon, QPalette, QBrush, QPixmap
 
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +53,99 @@ class DownloadSignals(QObject):
     download_paused = pyqtSignal(str)  # manga_name
     download_resumed = pyqtSignal(str)  # manga_name
 
+class MangaHistoryManager:
+    """Manages history of downloaded manga and chapters"""
+    
+    def __init__(self):
+        self.history_file = os.path.join(os.path.expanduser("~"), ".mangadownloader", "history.json")
+        self.history = self._load_history()
+        
+    def _load_history(self):
+        """Load history from file"""
+        try:
+            os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r') as f:
+                    loaded_data = json.load(f)
+                    # Ensure we have a dictionary
+                    if isinstance(loaded_data, dict):
+                        return loaded_data
+                    else:
+                        logging.error(f"History file contains invalid format: {type(loaded_data)}. Creating new history.")
+                        # If the file exists but has invalid format, rename it for backup
+                        backup_file = self.history_file + ".backup"
+                        try:
+                            os.rename(self.history_file, backup_file)
+                            logging.info(f"Renamed invalid history file to {backup_file}")
+                        except Exception as rename_err:
+                            logging.error(f"Failed to rename invalid history file: {rename_err}")
+        except Exception as e:
+            logging.error(f"Error loading history: {e}")
+        return {}  # Always return an empty dictionary as fallback
+    
+    def _save_history(self):
+        """Save history to file"""
+        try:
+            with open(self.history_file, 'w') as f:
+                json.dump(self.history, f, indent=2)
+        except Exception as e:
+            logging.error(f"Error saving history: {e}")
+    
+    def add_manga(self, manga_name, url, site_type):
+        """Add a manga to history"""
+        if manga_name not in self.history:
+            self.history[manga_name] = {
+                'url': url,
+                'site_type': site_type,
+                'added_date': datetime.now().isoformat(),
+                'last_updated': datetime.now().isoformat(),
+                'chapters': {}
+            }
+        else:
+            self.history[manga_name]['last_updated'] = datetime.now().isoformat()
+            
+        self._save_history()
+    
+    def add_downloaded_chapter(self, manga_name, chapter_num, site_type, chapter_url):
+        """Record a successfully downloaded chapter"""
+        if manga_name not in self.history:
+            self.add_manga(manga_name, "", site_type)
+            
+        self.history[manga_name]['chapters'][chapter_num] = {
+            'download_date': datetime.now().isoformat(),
+            'url': chapter_url
+        }
+        self.history[manga_name]['last_updated'] = datetime.now().isoformat()
+        
+        self._save_history()
+    
+    def get_manga_list(self):
+        """Get list of all manga in history"""
+        return list(self.history.keys())
+    
+    def get_manga_data(self, manga_name):
+        """Get data for a specific manga"""
+        return self.history.get(manga_name, {})
+    
+    def get_chapter_data(self, manga_name, chapter_num):
+        """Get data for a specific chapter"""
+        manga_data = self.get_manga_data(manga_name)
+        chapters = manga_data.get('chapters', {})
+        return chapters.get(chapter_num, {})
+    
+    def get_downloaded_chapters(self, manga_name):
+        """Get list of downloaded chapters for a manga"""
+        manga_data = self.get_manga_data(manga_name)
+        return list(manga_data.get('chapters', {}).keys())
+    
+    def update_manga_url(self, manga_name, url, site_type):
+        """Update the URL for a manga in history"""
+        if manga_name in self.history:
+            self.history[manga_name]['url'] = url
+            self.history[manga_name]['site_type'] = site_type
+            self.history[manga_name]['last_updated'] = datetime.now().isoformat()
+            self._save_history()
+
 class DownloadManager:
     def __init__(self, signals):
         self.signals = signals
@@ -61,6 +157,7 @@ class DownloadManager:
         self.paused_downloads = set()
         self.download_queue_list = []
         self.download_path = os.getcwd()
+        self.history_manager = MangaHistoryManager()
     
     def validate_manga_url(self, url: str) -> Tuple[bool, str]:
         """Validate if the URL is a supported manga URL and return the site type"""
@@ -359,8 +456,6 @@ class DownloadManager:
     
     def _track_download_progress(self, download_func, chapter_url, chapter_num, manga_name, site_type):
         """Simplified download progress tracking that won't interfere with the download process"""
-        original_get = requests.get
-        
         try:
             self.signals.chapter_progress.emit(manga_name, chapter_num, 0)
             
@@ -368,15 +463,16 @@ class DownloadManager:
             
             self.signals.chapter_progress.emit(manga_name, chapter_num, 100)
             
+            # Add to history when a chapter is successfully downloaded
+            if result:
+                self.history_manager.add_downloaded_chapter(manga_name, chapter_num, site_type, chapter_url)
+            
             return result
             
         except Exception as e:
             print(f"Error in download process: {e}")
             self.signals.chapter_progress.emit(manga_name, chapter_num, 0)
             raise
-            
-        finally:
-            requests.get = original_get
     
     def _parse_chapter_range(self, range_str):
         if not range_str:
@@ -402,6 +498,65 @@ class DownloadManager:
             self.download_path = path
             return True
         return False
+
+    def scan_for_new_chapters(self, manga_name=None):
+        """
+        Scan for new chapters for manga in history
+        If manga_name is provided, only scan that specific manga
+        Returns dict with manga names and lists of new chapters
+        """
+        new_chapters = {}
+        manga_list = self.history_manager.get_manga_list()
+        
+        if manga_name and manga_name in manga_list:
+            manga_list = [manga_name]
+            
+        for manga in manga_list:
+            manga_data = self.history_manager.get_manga_data(manga)
+            if not manga_data or not manga_data.get('url'):
+                continue
+                
+            site_type = manga_data.get('site_type', '')
+            url = manga_data.get('url', '')
+            
+            if not url or not site_type:
+                continue
+                
+            try:
+                all_chapters = self._get_chapters(url, site_type)
+                downloaded_chapters = manga_data.get('chapters', {})
+                
+                missing_chapters = []
+                for ch_num, ch_name, ch_url in all_chapters:
+                    if ch_num not in downloaded_chapters:
+                        missing_chapters.append((ch_num, ch_name, ch_url))
+                
+                if missing_chapters:
+                    new_chapters[manga] = missing_chapters
+            except Exception as e:
+                logging.error(f"Error scanning chapters for {manga}: {e}")
+                
+        return new_chapters
+    
+    def download_new_chapters(self, new_chapters_dict):
+        """Add new chapters to the download queue"""
+        total_added = 0
+        
+        for manga_name, chapters in new_chapters_dict.items():
+            if not chapters:
+                continue
+                
+            manga_data = self.history_manager.get_manga_data(manga_name)
+            if not manga_data or not manga_data.get('url'):
+                continue
+                
+            url = manga_data.get('url')
+            site_type = manga_data.get('site_type')
+            
+            self.add_to_queue(url, chapters)
+            total_added += len(chapters)
+            
+        return total_added
 
 class Toast(QDialog):
     def __init__(self, parent=None):
@@ -534,6 +689,82 @@ class Toast(QDialog):
         self.raise_()
         self.activateWindow()
 
+class SidebarButton(QToolButton):
+    """Custom button for sidebar navigation"""
+    def __init__(self, text, icon=None, parent=None):
+        super(SidebarButton, self).__init__(parent)
+        self.setText(text)
+        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.setCheckable(True)
+        self.setAutoExclusive(True)
+        
+        if icon:
+            self.setIcon(QIcon(icon))
+        
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(50)
+        
+        self.setStyleSheet("""
+            QToolButton {
+                border: none;
+                border-radius: 0px;
+                text-align: left;
+                padding: 10px;
+                color: #333;
+                font-weight: bold;
+            }
+            QToolButton:hover {
+                background-color: #e0e0e0;
+            }
+            QToolButton:checked {
+                background-color: #2196F3;
+                color: white;
+            }
+        """)
+
+class Sidebar(QWidget):
+    """Sidebar navigation widget"""
+    itemClicked = pyqtSignal(str)
+    
+    def __init__(self, parent=None):
+        super(Sidebar, self).__init__(parent)
+        self.initUI()
+        
+    def initUI(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        self.download_btn = SidebarButton("Downloads")
+        self.download_btn.setChecked(True)
+        self.download_btn.clicked.connect(lambda: self.itemClicked.emit("downloads"))
+        
+        self.history_btn = SidebarButton("History")
+        self.history_btn.clicked.connect(lambda: self.itemClicked.emit("history"))
+        
+        logo_label = QLabel("MasterOfKay's\nMangaDL")
+        logo_label.setStyleSheet("""
+            QLabel {
+                color: #2196F3;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 15px;
+                background-color: #f5f5f5;
+            }
+        """)
+        
+        layout.addWidget(logo_label)
+        layout.addWidget(self.download_btn)
+        layout.addWidget(self.history_btn)
+        layout.addStretch()
+        
+        settings_btn = SidebarButton("Settings")
+        settings_btn.clicked.connect(lambda: self.itemClicked.emit("settings"))
+        layout.addWidget(settings_btn)
+        
+        self.setMaximumWidth(200)
+        self.setMinimumWidth(200)
+
 class ChapterSelectionDialog(QDialog):
     def __init__(self, manga_name, chapters, parent=None):
         super(ChapterSelectionDialog, self).__init__(parent)
@@ -617,7 +848,7 @@ class ChapterSelectionDialog(QDialog):
         start = self.range_start.value() - 1
         end = self.range_end.value() - 1
         
-        for i, cb in self.chapter_checkboxes:
+        for i, cb in enumerate(self.chapter_checkboxes):
             cb.setChecked(start <= i <= end)
     
     def get_selected_chapters(self):
@@ -626,6 +857,206 @@ class ChapterSelectionDialog(QDialog):
             if cb.isChecked():
                 selected.append(self.chapters[i])
         return selected
+
+class HistoryListItemWidget(QWidget):
+    clicked = pyqtSignal(str)
+    download_new_clicked = pyqtSignal(str)
+    
+    def __init__(self, manga_name, chapter_count=0, last_update="", has_new=False, parent=None):
+        super(HistoryListItemWidget, self).__init__(parent)
+        self.manga_name = manga_name
+        self.has_new = has_new
+        
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        top_layout = QHBoxLayout()
+        self.name_label = QLabel(manga_name)
+        self.name_label.setFont(QFont("Arial", 10, QFont.Bold))
+        
+        status_text = f"{chapter_count} chapters"
+        if has_new:
+            status_text += " • New chapters! 🆕"
+        
+        self.status_label = QLabel(status_text)
+        self.status_label.setStyleSheet("color: #666;")
+        
+        if has_new:
+            self.download_btn = QPushButton("Download New")
+            self.download_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border-radius: 4px;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+            """)
+            self.download_btn.clicked.connect(lambda: self.download_new_clicked.emit(manga_name))
+        else:
+            self.download_btn = QPushButton("Check")
+            self.download_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    border-radius: 4px;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #0b7dda;
+                }
+            """)
+            self.download_btn.clicked.connect(lambda: self.download_new_clicked.emit(manga_name))
+        
+        top_layout.addWidget(self.name_label)
+        top_layout.addStretch()
+        top_layout.addWidget(self.download_btn)
+        
+        info_layout = QHBoxLayout()
+        date_label = QLabel(f"Last update: {last_update}")
+        date_label.setStyleSheet("color: #999; font-size: 9pt;")
+        info_layout.addWidget(date_label)
+        info_layout.addStretch()
+        
+        layout.addLayout(top_layout)
+        layout.addWidget(self.status_label)
+        layout.addLayout(info_layout)
+        
+        self.setStyleSheet("""
+            HistoryListItemWidget {
+                background-color: white;
+                border-radius: 8px;
+                border: 1px solid #ddd;
+            }
+            HistoryListItemWidget:hover {
+                background-color: #f5f5f5;
+                border: 1px solid #ccc;
+            }
+        """)
+    
+    def set_has_new(self, has_new):
+        self.has_new = has_new
+        chapter_count = int(self.status_label.text().split()[0])
+        status_text = f"{chapter_count} chapters"
+        
+        if has_new:
+            status_text += " • New chapters! 🆕"
+            self.download_btn.setText("Download New")
+            self.download_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border-radius: 4px;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+            """)
+        else:
+            self.download_btn.setText("Check")
+            self.download_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    border-radius: 4px;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #0b7dda;
+                }
+            """)
+        
+        self.status_label.setText(status_text)
+    
+    def mousePressEvent(self, event):
+        """Handle mouse click events with proper event handling"""
+        if event.button() == Qt.LeftButton:
+            if not self.download_btn.geometry().contains(event.pos()):
+                self.clicked.emit(self.manga_name)
+                event.accept()
+                return
+        
+        super(HistoryListItemWidget, self).mousePressEvent(event)
+
+class ChapterListItem(QWidget):
+    retry_clicked = pyqtSignal(str, str)  # manga_name, chapter_num
+    
+    def __init__(self, manga_name, chapter_num, chapter_name, status="", parent=None):
+        super(ChapterListItem, self).__init__(parent)
+        self.manga_name = manga_name
+        self.chapter_num = chapter_num
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.status_indicator = QLabel()
+        self.status_indicator.setFixedSize(16, 16)
+        self.status_indicator.setStyleSheet("border-radius: 8px; background-color: #ddd;")
+        
+        chapter_label = QLabel(f"Chapter {chapter_num}: {chapter_name}")
+        chapter_label.setFont(QFont("Arial", 10))
+        
+        self.status_label = QLabel(status)
+        self.status_label.setFixedWidth(100)
+        
+        self.retry_btn = QPushButton("Retry")
+        self.retry_btn.setFixedWidth(60)
+        self.retry_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #F44336;
+                color: white;
+                border-radius: 4px;
+                padding: 3px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        self.retry_btn.clicked.connect(lambda: self.retry_clicked.emit(manga_name, chapter_num))
+        self.retry_btn.hide()
+        
+        layout.addWidget(self.status_indicator)
+        layout.addWidget(chapter_label)
+        layout.addStretch()
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.retry_btn)
+        
+        self.setStyleSheet("padding: 3px; margin: 2px 0;")
+        self.update_status("unknown")
+        # Initialize with the given status
+    def update_status(self, status):
+        """Update visual status indicators"""
+        if status == "completed" or status == "downloaded":
+            self.status_indicator.setStyleSheet("border-radius: 8px; background-color: #4CAF50;")
+            self.status_label.setText("Downloaded")
+            self.status_label.setStyleSheet("color: #4CAF50;")
+            self.retry_btn.hide()
+        elif status == "failed":
+            self.status_indicator.setStyleSheet("border-radius: 8px; background-color: #F44336;")
+            self.status_label.setText("Failed")
+            self.status_label.setStyleSheet("color: #F44336;")
+            self.retry_btn.show()
+        elif status == "downloading":
+            self.status_indicator.setStyleSheet("border-radius: 8px; background-color: #FFC107;")
+            self.status_label.setText("Downloading")
+            self.status_label.setStyleSheet("color: #FFC107;")
+            self.retry_btn.hide()
+        elif status == "new":
+            self.status_indicator.setStyleSheet("border-radius: 8px; background-color: #2196F3;")
+            self.status_label.setText("New! 🆕")
+            self.status_label.setStyleSheet("color: #2196F3;")
+            self.retry_btn.hide()
+        else:
+            self.status_indicator.setStyleSheet("border-radius: 8px; background-color: #9E9E9E;")
+            self.status_label.setText("Not Downloaded")
+            self.status_label.setStyleSheet("color: #9E9E9E;")
+            self.retry_btn.hide()
 
 class DownloadListItemWidget(QWidget):
     clicked = pyqtSignal(str)
@@ -813,13 +1244,14 @@ class MangaDownloaderApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Manga Downloader")
-        self.resize(800, 600)
+        self.resize(1000, 700)
         
         self.download_path = os.path.abspath(os.getcwd())
         self.load_download_path()
         
         self.signals = DownloadSignals()
         self.download_manager = DownloadManager(self.signals)
+        self.history_manager = self.download_manager.history_manager
         
         self.download_manager.download_path = self.download_path
         
@@ -842,15 +1274,72 @@ class MangaDownloaderApp(QMainWindow):
         self.chapter_progress = {}  # manga_name -> {chapter_num -> progress}
         
         self.init_ui()
+        
+        # Initial scan for new chapters
+        QTimer.singleShot(1000, self.scan_all_manga)
+    
+    def load_download_path(self):
+        """Load download path from config if available"""
+        config_path = os.path.join(os.path.expanduser("~"), ".mangadownloader", "config.txt")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    for line in f:
+                        if line.startswith("download_path="):
+                            path = line.strip().split("=", 1)[1]
+                            if os.path.isdir(path):
+                                self.download_path = path
+                                break
+            except Exception as e:
+                print(f"Error loading config: {e}")
+    
+    def save_download_path(self):
+        """Save download path to a config file"""
+        config_dir = os.path.join(os.path.expanduser("~"), ".mangadownloader")
+        os.makedirs(config_dir, exist_ok=True)
+        
+        config_path = os.path.join(config_dir, "config.txt")
+        with open(config_path, "w") as f:
+            f.write(f"download_path={self.download_path}")
+    
+    def on_path_changed(self, path):
+        """Handle when user types or pastes a path"""
+        if os.path.isdir(path):
+            self.download_path = path
+            self.save_download_path()
+            self.download_manager.download_path = self.download_path
+    
+    def browse_for_path(self):
+        """Open file dialog to select download directory"""
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Download Folder",
+            self.download_path,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        )
+        
+        if path:
+            self.download_path = path
+            self.path_input.setText(path)
+            self.save_download_path()
+            self.download_manager.download_path = self.download_path
     
     def init_ui(self):
         central_widget = QWidget()
-        main_layout = QVBoxLayout(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
-        header = QLabel("MasterOfKay's Manga Downloader")
-        header.setFont(QFont("Arial", 16, QFont.Bold))
-        header.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(header)
+        # Create sidebar
+        self.sidebar = Sidebar()
+        self.sidebar.itemClicked.connect(self.on_sidebar_item_clicked)
+        
+        # Create stacked widget for main content
+        self.content_stack = QStackedWidget()
+        
+        # Create downloads page
+        downloads_page = QWidget()
+        downloads_layout = QVBoxLayout(downloads_page)
+        downloads_layout.setContentsMargins(20, 20, 20, 20)
         
         url_layout = QHBoxLayout()
         url_label = QLabel("Manga URL:")
@@ -862,7 +1351,7 @@ class MangaDownloaderApp(QMainWindow):
         url_layout.addWidget(url_label)
         url_layout.addWidget(self.url_input)
         url_layout.addWidget(download_btn)
-        main_layout.addLayout(url_layout)
+        downloads_layout.addLayout(url_layout)
         
         path_layout = QHBoxLayout()
         path_label = QLabel("Save Path:")
@@ -876,12 +1365,7 @@ class MangaDownloaderApp(QMainWindow):
         path_layout.addWidget(path_label)
         path_layout.addWidget(self.path_input)
         path_layout.addWidget(browse_btn)
-        main_layout.addLayout(path_layout)
-        
-        tabs = QTabWidget()
-        
-        downloads_tab = QWidget()
-        downloads_layout = QVBoxLayout(downloads_tab)
+        downloads_layout.addLayout(path_layout)
         
         self.queue_status_label = QLabel("No downloads in queue")
         downloads_layout.addWidget(self.queue_status_label)
@@ -898,29 +1382,173 @@ class MangaDownloaderApp(QMainWindow):
         clear_btn.clicked.connect(self.clear_completed_downloads)
         downloads_layout.addWidget(clear_btn)
         
-        tabs.addTab(downloads_tab, "Downloads")
+        # Create history page
+        history_page = QWidget()
+        history_layout = QVBoxLayout(history_page)
+        history_layout.setContentsMargins(20, 20, 20, 20)
         
-        self.chapter_details = QWidget()
-        self.chapter_details_layout = QVBoxLayout(self.chapter_details)
-        self.chapter_details_title = QLabel("Select a manga to view chapters")
+        history_header = QLabel("Download History")
+        history_header.setFont(QFont("Arial", 16, QFont.Bold))
+        history_layout.addWidget(history_header)
+        
+        scan_layout = QHBoxLayout()
+        scan_btn = QPushButton("Scan All for New Chapters")
+        scan_btn.clicked.connect(self.scan_all_manga)
+        scan_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0b7dda;
+            }
+        """)
+        
+        scan_external_btn = QPushButton("Scan External Chapters")
+        scan_external_btn.clicked.connect(self.scan_all_external_chapters)
+        scan_external_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #9C27B0;
+                color: white;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #7B1FA2;
+            }
+        """)
+        
+        download_all_btn = QPushButton("Download All New")
+        download_all_btn.clicked.connect(self.download_all_new)
+        download_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        
+        scan_layout.addWidget(scan_btn)
+        scan_layout.addWidget(scan_external_btn)
+        scan_layout.addWidget(download_all_btn)
+        history_layout.addLayout(scan_layout)
+        
+        self.history_list_scroll = QScrollArea()
+        self.history_list_scroll.setWidgetResizable(True)
+        history_content = QWidget()
+        self.history_layout = QVBoxLayout(history_content)
+        self.history_layout.setAlignment(Qt.AlignTop)
+        self.history_layout.setSpacing(10)
+        self.history_list_scroll.setWidget(history_content)
+        history_layout.addWidget(self.history_list_scroll)
+        
+        # Create settings page
+        settings_page = QWidget()
+        settings_layout = QVBoxLayout(settings_page)
+        settings_layout.setContentsMargins(20, 20, 20, 20)
+        
+        settings_header = QLabel("Settings")
+        settings_header.setFont(QFont("Arial", 16, QFont.Bold))
+        settings_layout.addWidget(settings_header)
+        
+        # Add some settings...
+        settings_layout.addStretch()
+        
+        # Add pages to stack
+        self.content_stack.addWidget(downloads_page)
+        self.content_stack.addWidget(history_page)
+        self.content_stack.addWidget(settings_page)
+        
+        # Create chapter details panel (initially hidden)
+        self.chapter_panel = QWidget()
+        self.chapter_panel.setMaximumWidth(0)
+        self.chapter_panel.setMinimumWidth(0)
+        
+        chapter_panel_layout = QVBoxLayout(self.chapter_panel)
+        chapter_panel_layout.setContentsMargins(0, 0, 0, 0)
+        
+        chapter_header_layout = QHBoxLayout()
+        self.chapter_details_title = QLabel("Manga Title")
         self.chapter_details_title.setFont(QFont("Arial", 12, QFont.Bold))
-        self.chapter_details_layout.addWidget(self.chapter_details_title)
         
-        self.chapter_list = QListWidget()
-        self.chapter_details_layout.addWidget(self.chapter_list)
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(30, 30)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e0e0e0;
+                color: #333;
+                border-radius: 15px;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #d0d0d0;
+            }
+        """)
+        close_btn.clicked.connect(self.hide_chapter_panel)
         
-        main_layout.addWidget(tabs)
-        main_layout.addWidget(self.chapter_details)
+        chapter_header_layout.addWidget(self.chapter_details_title)
+        chapter_header_layout.addStretch()
+        chapter_header_layout.addWidget(close_btn)
+        
+        chapter_panel_layout.addLayout(chapter_header_layout)
+        
+        chapter_scroll = QScrollArea()
+        chapter_scroll.setWidgetResizable(True)
+        
+        chapter_content = QWidget()
+        self.chapter_list_layout = QVBoxLayout(chapter_content)
+        self.chapter_list_layout.setAlignment(Qt.AlignTop)
+        chapter_scroll.setWidget(chapter_content)
+        
+        chapter_panel_layout.addWidget(chapter_scroll)
+        
+        # Splitter to allow resizing
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.sidebar)
+        
+        # Container for content and chapter panel
+        content_container = QWidget()
+        container_layout = QHBoxLayout(content_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.addWidget(self.content_stack)
+        container_layout.addWidget(self.chapter_panel)
+        
+        splitter.addWidget(content_container)
+        
+        main_layout.addWidget(splitter)
         
         self.setCentralWidget(central_widget)
         
         self.create_menu_bar()
+        
+        # Populate history list
+        self.populate_history_list()
     
     def create_menu_bar(self):
         """Create application menu bar"""
         menu_bar = self.menuBar()
         
         file_menu = menu_bar.addMenu("&File")
+        
+        scan_action = QAction("&Scan for New Chapters", self)
+        scan_action.triggered.connect(self.scan_all_manga)
+        file_menu.addAction(scan_action)
+        
+        scan_external_action = QAction("Scan for &External Chapters", self)
+        scan_external_action.triggered.connect(self.scan_all_external_chapters)
+        file_menu.addAction(scan_external_action)
+        
+        file_menu.addSeparator()
         
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut("Ctrl+Q")
@@ -939,8 +1567,8 @@ class MangaDownloaderApp(QMainWindow):
             self,
             "About MasterOfKay's Manga Downloader",
             """
-            <h3>MasterOfKay's Manga Downloader v1.2</h3>
-            <p>Download manga from popular sites.</p>
+            <h3>MasterOfKay's Manga Downloader v1.3</h3>
+            <p>Download manga from popular sites with history tracking.</p>
             <p>Supported sites:</p>
             <ul>
                 <li>AsuraScans</li>
@@ -951,7 +1579,575 @@ class MangaDownloaderApp(QMainWindow):
             """
         )
     
+    def on_sidebar_item_clicked(self, item):
+        """Handle sidebar navigation"""
+        if item == "downloads":
+            self.content_stack.setCurrentIndex(0)
+        elif item == "history":
+            self.content_stack.setCurrentIndex(1)
+            self.populate_history_list()
+        elif item == "settings":
+            self.content_stack.setCurrentIndex(2)
+    
+    def populate_history_list(self):
+        """Populate the history list with manga from history"""
+        # Clear current list
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Add manga from history
+        manga_list = self.history_manager.get_manga_list()
+        
+        if not manga_list:
+            empty_label = QLabel("No manga in history")
+            empty_label.setAlignment(Qt.AlignCenter)
+            empty_label.setStyleSheet("color: #999; font-size: 14px; padding: 20px;")
+            self.history_layout.addWidget(empty_label)
+            return
+        
+        # Sort by last updated date (newest first)
+        sorted_manga = []
+        for manga_name in manga_list:
+            manga_data = self.history_manager.get_manga_data(manga_name)
+            last_updated = manga_data.get('last_updated', '')
+            
+            if last_updated:
+                try:
+                    last_updated_date = datetime.fromisoformat(last_updated)
+                    sorted_manga.append((manga_name, last_updated_date))
+                except ValueError:
+                    sorted_manga.append((manga_name, datetime.min))
+            else:
+                sorted_manga.append((manga_name, datetime.min))
+        
+        sorted_manga.sort(key=lambda x: x[1], reverse=True)
+        
+        for manga_name, last_updated_date in sorted_manga:
+            manga_data = self.history_manager.get_manga_data(manga_name)
+            chapters = manga_data.get('chapters', {})
+            
+            last_updated_str = last_updated_date.strftime("%Y-%m-%d %H:%M")
+            
+            # Check if this manga has new chapters
+            if hasattr(self, 'new_chapters_cache') and manga_name in self.new_chapters_cache:
+                has_new = True
+            else:
+                has_new = False
+            
+            item = HistoryListItemWidget(
+                manga_name=manga_name,
+                chapter_count=len(chapters),
+                last_update=last_updated_str,
+                has_new=has_new
+            )
+            
+            item.clicked.connect(self.display_manga_chapters)
+            item.download_new_clicked.connect(self.download_manga_new_chapters)
+            
+            self.history_layout.addWidget(item)
+    
+    def scan_all_manga(self):
+        """Scan all manga in history for new chapters"""
+        self.signals.show_toast.emit("Scanning for new chapters...", "info")
+        
+        # Run in background thread to avoid freezing UI
+        def scan_task():
+            new_chapters = self.download_manager.scan_for_new_chapters()
+            
+            # Cache the results
+            self.new_chapters_cache = new_chapters
+            
+            # Count total new chapters
+            total_new = sum(len(chapters) for chapters in new_chapters.values())
+            manga_count = len(new_chapters)
+            
+            # Update UI in main thread
+            if total_new > 0:
+                self.signals.show_toast.emit(
+                    f"Found {total_new} new chapters for {manga_count} manga!", 
+                    "success"
+                )
+                
+                # Update history items
+                for i in range(self.history_layout.count()):
+                    item = self.history_layout.itemAt(i).widget()
+                    if isinstance(item, HistoryListItemWidget):
+                        if item.manga_name in new_chapters:
+                            item.set_has_new(True)
+            else:
+                self.signals.show_toast.emit("No new chapters found", "info")
+        
+        threading.Thread(target=scan_task, daemon=True).start()
+    
+    def scan_all_external_chapters(self):
+        """Scan all manga directories for externally downloaded chapters"""
+        self.signals.show_toast.emit("Scanning for external chapters...", "info")
+        
+        def scan_task():
+            try:
+                total_added = 0
+                manga_list = self.history_manager.get_manga_list()
+                
+                # Also scan directories that might not be in history yet
+                try:
+                    if os.path.exists(self.download_path):
+                        for dirname in os.listdir(self.download_path):
+                            if os.path.isdir(os.path.join(self.download_path, dirname)):
+                                if dirname not in manga_list:
+                                    # Add to history with placeholder data
+                                    self.history_manager.add_manga(dirname, "", "unknown")
+                                    manga_list.append(dirname)
+                except Exception as dir_scan_err:
+                    logging.error(f"Error scanning directories: {dir_scan_err}")
+                
+                for manga_name in manga_list:
+                    added = self.scan_external_chapters(manga_name)
+                    if added:
+                        total_added += 1
+                
+                if total_added > 0:
+                    self.signals.show_toast.emit(
+                        f"Found external chapters for {total_added} manga", 
+                        "success"
+                    )
+                    # Refresh history list and chapter view if open
+                    if hasattr(self, '_last_displayed_manga'):
+                        self.display_manga_chapters(self._last_displayed_manga)
+                else:
+                    self.signals.show_toast.emit("No new external chapters found", "info")
+            
+            except Exception as e:
+                logging.error(f"Error in external chapter scan: {e}")
+                self.signals.show_toast.emit(f"Error scanning: {str(e)}", "error")
+        
+        threading.Thread(target=scan_task, daemon=True).start()
+    
+    def check_manga_for_updates(self, manga_name):
+        """Check single manga for updates"""
+        self.signals.show_toast.emit(f"Checking {manga_name} for updates...", "info")
+        
+        # Run in background thread
+        def check_task():
+            try:
+                new_chapters = self.download_manager.scan_for_new_chapters(manga_name)
+                
+                # Cache the results
+                if not hasattr(self, 'new_chapters_cache'):
+                    self.new_chapters_cache = {}
+                
+                if manga_name in new_chapters and new_chapters[manga_name]:
+                    self.new_chapters_cache[manga_name] = new_chapters[manga_name]
+                    count = len(new_chapters[manga_name])
+                    
+                    # Update UI in main thread
+                    def on_chapters_found():
+                        self.signals.show_toast.emit(
+                            f"Found {count} new chapters for {manga_name}!", 
+                            "success"
+                        )
+                        
+                        # Update history item
+                        for i in range(self.history_layout.count()):
+                            item = self.history_layout.itemAt(i).widget()
+                            if isinstance(item, HistoryListItemWidget) and item.manga_name == manga_name:
+                                item.set_has_new(True)
+                                break
+                        
+                        # If chapter panel is open for this manga, refresh it
+                        if hasattr(self, '_last_displayed_manga') and self._last_displayed_manga == manga_name:
+                            self.display_manga_chapters(manga_name)
+                        
+                        # Ask if user wants to download now
+                        response = QMessageBox.question(
+                            self, 
+                            "New Chapters Found", 
+                            f"Download {count} new chapters for {manga_name} now?",
+                            QMessageBox.Yes | QMessageBox.No
+                        )
+                        
+                        if response == QMessageBox.Yes:
+                            # Create a COPY of the chapters to avoid thread issues
+                            chapters_to_download = {manga_name: new_chapters[manga_name][:]}
+                            self.download_new_chapters_safe(chapters_to_download)
+                            # Force queue display refresh to show all items
+                            self.update_queue_display()
+                    
+                    # Schedule in main thread
+                    QTimer.singleShot(0, on_chapters_found)
+                else:
+                    # No new chapters found
+                    def on_no_chapters():
+                        if manga_name in self.new_chapters_cache:
+                            del self.new_chapters_cache[manga_name]
+                        
+                        self.signals.show_toast.emit(f"No new chapters found for {manga_name}", "info")
+                        
+                        # Update history item
+                        for i in range(self.history_layout.count()):
+                            item = self.history_layout.itemAt(i).widget()
+                            if isinstance(item, HistoryListItemWidget) and item.manga_name == manga_name:
+                                item.set_has_new(False)
+                                break
+                    
+                    # Schedule in main thread
+                    QTimer.singleShot(0, on_no_chapters)
+            except Exception as e:
+                # Handle errors
+                def on_error():
+                    self.signals.show_toast.emit(f"Error checking for updates: {str(e)}", "error")
+                
+                QTimer.singleShot(0, on_error)
+        
+        threading.Thread(target=check_task, daemon=True).start()
+
+    def download_manga_new_chapters(self, manga_name):
+        """Directly download new chapters for a specific manga"""
+        if not hasattr(self, 'new_chapters_cache') or manga_name not in self.new_chapters_cache:
+            self.signals.show_toast.emit(f"No new chapters found for {manga_name}", "info")
+            return
+        
+        chapters = self.new_chapters_cache[manga_name]
+        if not chapters:
+            self.signals.show_toast.emit(f"No new chapters found for {manga_name}", "info")
+            return
+        
+        # Create a copy of the chapters to avoid thread issues
+        chapters_to_download = {manga_name: chapters[:]}
+        
+        # Add to download queue
+        count = len(chapters)
+        self.download_new_chapters_safe(chapters_to_download)
+        
+        # Show success message
+        self.signals.show_toast.emit(f"Added {count} new chapters of {manga_name} to download queue", "success")
+        
+        # Switch to downloads tab
+        self.sidebar.download_btn.setChecked(True)
+        self.content_stack.setCurrentIndex(0)
+        
+        # Force queue display refresh
+        self.update_queue_display()
+        
+        # Update history item to no longer show "new" status
+        for i in range(self.history_layout.count()):
+            item = self.history_layout.itemAt(i).widget()
+            if isinstance(item, HistoryListItemWidget) and item.manga_name == manga_name:
+                item.set_has_new(False)
+                break
+
+    def download_new_chapters_safe(self, new_chapters_dict):
+        """Thread-safe version to add new chapters to download queue"""
+        added = 0
+        
+        for manga_name, chapters in new_chapters_dict.items():
+            if not chapters:
+                continue
+                
+            manga_data = self.history_manager.get_manga_data(manga_name)
+            if not manga_data or not manga_data.get('url'):
+                continue
+                
+            url = manga_data.get('url')
+            site_type = manga_data.get('site_type')
+            
+            success = self.download_manager.add_to_queue(url, chapters)
+            if success:
+                added += len(chapters)
+                
+                # Update UI for this manga
+                if hasattr(self, 'new_chapters_cache') and manga_name in self.new_chapters_cache:
+                    del self.new_chapters_cache[manga_name]
+        
+        if added > 0:
+            self.signals.show_toast.emit(f"Added {added} chapters to download queue", "success")
+            
+            # Switch to downloads tab
+            self.sidebar.download_btn.setChecked(True)
+            self.content_stack.setCurrentIndex(0)
+            
+            # Refresh history list and force queue display update
+            self.populate_history_list()
+            self.update_queue_display()
+        else:
+            self.signals.show_toast.emit("Failed to add chapters to queue", "error")
+
+    def download_all_new(self):
+        """Download all new chapters that have been found"""
+        if not hasattr(self, 'new_chapters_cache') or not self.new_chapters_cache:
+            self.signals.show_toast.emit("No new chapters found to download", "info")
+            return
+        
+        count = sum(len(chapters) for chapters in self.new_chapters_cache.values())
+        manga_count = len(self.new_chapters_cache)
+        
+        response = QMessageBox.question(
+            self, 
+            "Download New Chapters", 
+            f"Download {count} new chapters for {manga_count} manga?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if response == QMessageBox.Yes:
+            # Create a deep copy of the cache to avoid modification issues
+            import copy
+            cache_copy = copy.deepcopy(self.new_chapters_cache)
+            self.download_new_chapters_safe(cache_copy)
+            # Force queue display update to show all queued items
+            self.update_queue_display()
+
+    def display_manga_chapters(self, manga_name):
+        """Display chapters for a manga in the side panel"""
+        logging.info(f"Displaying chapters for {manga_name}")
+        self._last_displayed_manga = manga_name
+        self.chapter_details_title.setText(manga_name)
+        
+        # Clear current chapter list
+        while self.chapter_list_layout.count():
+            item = self.chapter_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Add loading indicator
+        loading = QLabel("Loading chapters...")
+        loading.setAlignment(Qt.AlignCenter)
+        self.chapter_list_layout.addWidget(loading)
+        
+        # Show the panel with animation
+        self.animate_chapter_panel_show()
+        
+        # Create a worker thread to fetch chapters
+        class ChapterLoaderThread(threading.Thread):
+            def __init__(self, parent, manga_name):
+                super().__init__(daemon=True)
+                self.parent = parent
+                self.manga_name = manga_name
+                self.chapters = []
+                self.error = None
+                
+            def run(self):
+                try:
+                    manga_data = self.parent.history_manager.get_manga_data(self.manga_name)
+                    if not manga_data or not manga_data.get('url'):
+                        self.error = "No data available for this manga"
+                        return
+                    
+                    url = manga_data.get('url')
+                    site_type = manga_data.get('site_type')
+                    
+                    self.chapters = self.parent.download_manager._get_chapters(url, site_type)
+                    
+                    if not self.chapters:
+                        self.error = "No chapters found"
+                except Exception as e:
+                    self.error = str(e)
+                    logging.error(f"Error loading chapters: {e}")
+        
+        # Create and start the thread
+        loader = ChapterLoaderThread(self, manga_name)
+        loader.start()
+        
+        # Check for results periodically in the main thread
+        def check_loader():
+            if not loader.is_alive():
+                # Thread completed
+                if loader.error:
+                    # Show error
+                    while self.chapter_list_layout.count():
+                        item = self.chapter_list_layout.takeAt(0)
+                        if item.widget():
+                            item.widget().deleteLater()
+                    
+                    error_label = QLabel(f"Error: {loader.error}")
+                    error_label.setStyleSheet("color: #F44336; padding: 20px;")
+                    error_label.setAlignment(Qt.AlignCenter)
+                    self.chapter_list_layout.addWidget(error_label)
+                elif not loader.chapters:
+                    # No chapters found
+                    while self.chapter_list_layout.count():
+                        item = self.chapter_list_layout.takeAt(0)
+                        if item.widget():
+                            item.widget().deleteLater()
+                    
+                    empty_label = QLabel("No chapters found")
+                    empty_label.setStyleSheet("color: #999; padding: 20px;")
+                    empty_label.setAlignment(Qt.AlignCenter)
+                    self.chapter_list_layout.addWidget(empty_label)
+                else:
+                    # Chapters found - Display them
+                    self.populate_chapter_list(manga_name, loader.chapters)
+            else:
+                # Thread still running, check again in 100ms
+                QTimer.singleShot(100, check_loader)
+        
+        # Start checking
+        QTimer.singleShot(100, check_loader)
+
+    def populate_chapter_list(self, manga_name, chapters):
+        """Populate chapter list with downloaded status - called in main thread"""
+        logging.info(f"Populating chapter list for {manga_name} with {len(chapters)} chapters")
+        
+        # Clear current list
+        while self.chapter_list_layout.count():
+            item = self.chapter_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Get downloaded chapters from history
+        downloaded_chapters = self.history_manager.get_downloaded_chapters(manga_name)
+        
+        # Check filesystem for externally downloaded chapters
+        self.scan_external_chapters(manga_name)
+        
+        # Get updated list after scanning
+        downloaded_chapters = self.history_manager.get_downloaded_chapters(manga_name)
+        
+        # Get chapters being downloaded
+        downloading_chapters = set()
+        if manga_name in self.chapter_status:
+            for ch_num, status in self.chapter_status[manga_name].items():
+                if status == "Downloading":
+                    downloading_chapters.add(ch_num)
+        
+        # Get new chapters from scan
+        new_chapters = set()
+        if hasattr(self, 'new_chapters_cache') and manga_name in self.new_chapters_cache:
+            new_chapters = {ch[0] for ch in self.new_chapters_cache[manga_name]}
+        
+        # Sort chapters - handle potential errors
+        try:
+            sorted_chapters = sorted(
+                chapters, 
+                key=lambda x: float(x[0]) if x[0].replace('.', '', 1).isdigit() else 0
+            )
+        except Exception as e:
+            logging.error(f"Error sorting chapters: {e}")
+            sorted_chapters = chapters  # Fall back to unsorted
+        
+        # Header with progress
+        total_chapters = len(sorted_chapters)
+        downloaded_count = len(downloaded_chapters)
+        
+        progress_percent = int((downloaded_count / total_chapters) * 100) if total_chapters > 0 else 0
+        
+        header = QLabel(f"Progress: {downloaded_count}/{total_chapters} chapters ({progress_percent}%)")
+        header.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
+        self.chapter_list_layout.addWidget(header)
+        
+        progress_bar = QProgressBar()
+        progress_bar.setMinimum(0)
+        progress_bar.setMaximum(100)
+        progress_bar.setValue(progress_percent)
+        self.chapter_list_layout.addWidget(progress_bar)
+        
+        # Add chapters
+        for chapter_num, chapter_name, chapter_url in sorted_chapters:
+            status = "unknown"
+            
+            # Check if chapter is downloaded (in history)
+            if chapter_num in downloaded_chapters:
+                status = "completed"
+            elif chapter_num in downloading_chapters:
+                status = "downloading"
+            elif chapter_num in new_chapters:
+                status = "new"
+            
+            # Create the chapter item with the proper status
+            chapter_item = ChapterListItem(
+                manga_name=manga_name,
+                chapter_num=chapter_num,
+                chapter_name=chapter_name,
+                status=status
+            )
+            
+            # Force update the status to ensure styling is applied
+            chapter_item.update_status(status)
+            
+            chapter_item.retry_clicked.connect(self.retry_chapter_download)
+            
+            self.chapter_list_layout.addWidget(chapter_item)
+
+    def scan_external_chapters(self, manga_name):
+        """Scan filesystem for chapters that were downloaded outside of the app"""
+        logging.info(f"Scanning for external chapters for {manga_name}")
+        try:
+            # Get manga directory
+            manga_folder = os.path.join(self.download_path, manga_name)
+            if not os.path.exists(manga_folder) or not os.path.isdir(manga_folder):
+                logging.info(f"No manga folder found at {manga_folder}")
+                return
+            
+            # Get manga data from history to determine site type
+            manga_data = self.history_manager.get_manga_data(manga_name)
+            site_type = manga_data.get('site_type', 'unknown')
+            
+            # Get already known chapters
+            known_chapters = self.history_manager.get_downloaded_chapters(manga_name)
+            
+            # Look for chapter files in the folder
+            added_count = 0
+            for filename in os.listdir(manga_folder):
+                if filename.endswith('.cbz'):
+                    # Extract chapter number from filename
+                    match = re.search(r'Chapter\s+(\d+(?:\.\d+)?)', filename)
+                    if match:
+                        chapter_num = match.group(1)
+                        
+                        # Check if this chapter is already in history
+                        if chapter_num not in known_chapters:
+                            cbz_path = os.path.join(manga_folder, filename)
+                            
+                            # Add to history if file exists and has content
+                            if os.path.exists(cbz_path) and os.path.getsize(cbz_path) > 0:
+                                logging.info(f"Found external chapter: {manga_name} Chapter {chapter_num}")
+                                self.history_manager.add_downloaded_chapter(
+                                    manga_name, 
+                                    chapter_num, 
+                                    site_type,
+                                    "" # No URL for external chapters
+                                )
+                                added_count += 1
+            
+            if added_count > 0:
+                logging.info(f"Added {added_count} external chapters for {manga_name}")
+                return True
+            
+            return False
+        except Exception as e:
+            logging.error(f"Error scanning external chapters: {e}")
+            logging.error(traceback.format_exc())
+            return False
+    
+    def retry_chapter_download(self, manga_name, chapter_num):
+        """Retry downloading a failed chapter"""
+        manga_data = self.history_manager.get_manga_data(manga_name)
+        if not manga_data or not manga_data.get('url'):
+            self.signals.show_toast.emit(f"No data available for {manga_name}", "error")
+            return
+        
+        url = manga_data.get('url')
+        site_type = manga_data.get('site_type')
+        
+        # Get chapters to find the specific chapter URL
+        try:
+            all_chapters = self.download_manager._get_chapters(url, site_type)
+            matching_chapters = [ch for ch in all_chapters if ch[0] == chapter_num]
+            
+            if matching_chapters:
+                self.download_manager.add_to_queue(url, matching_chapters)
+                self.signals.show_toast.emit(f"Added Chapter {chapter_num} to download queue", "success")
+                
+                # Switch to downloads tab
+                self.sidebar.download_btn.setChecked(True)
+                self.content_stack.setCurrentIndex(0)
+            else:
+                self.signals.show_toast.emit(f"Could not find Chapter {chapter_num}", "error")
+        except Exception as e:
+            self.signals.show_toast.emit(f"Error: {str(e)}", "error")
+    
     def start_download(self):
+        """Start a new manga download - thread-safe"""
         url = self.url_input.text().strip()
         if not url:
             self.show_toast("Please enter a manga URL", "error")
@@ -962,37 +2158,89 @@ class MangaDownloaderApp(QMainWindow):
             self.show_toast(f"Invalid URL format. Supported sites: AsuraScans, MangaKatana, Webtoon", "error")
             return
         
-        try:
-            if site_type == "asura":
-                manga_name = asura_get_manga_name(url)
-                chapters = asura_get_chapter_links(url)
-            elif site_type == "katana":
-                manga_name = katana_get_manga_name(url)
-                chapters = katana_get_chapter_links(url)
+        # Show loading indicator
+        self.show_toast("Fetching manga information...", "info")
+        
+        # Create thread for fetching data
+        class MangaFetchThread(threading.Thread):
+            def __init__(self, parent, url, site_type):
+                super().__init__(daemon=True)
+                self.parent = parent
+                self.url = url
+                self.site_type = site_type
+                self.manga_name = None
+                self.chapters = None
+                self.error = None
+                
+            def run(self):
+                try:
+                    if self.site_type == "asura":
+                        self.manga_name = asura_get_manga_name(self.url)
+                        self.chapters = asura_get_chapter_links(self.url)
+                    elif self.site_type == "katana":
+                        self.manga_name = katana_get_manga_name(self.url)
+                        self.chapters = katana_get_chapter_links(self.url)
+                    else:
+                        self.manga_name = webtoon_get_manga_name(self.url)
+                        self.chapters = webtoon_get_chapter_links(self.url)
+                        
+                    if not self.chapters:
+                        self.error = f"No chapters found for {self.manga_name}"
+                except Exception as e:
+                    self.error = str(e)
+                    logging.error(f"Error fetching manga: {e}")
+        
+        # Create and start the thread
+        fetcher = MangaFetchThread(self, url, site_type)
+        fetcher.start()
+        
+        # Check for results periodically in the main thread
+        def check_fetcher():
+            if not fetcher.is_alive():
+                # Thread completed
+                if fetcher.error:
+                    self.show_toast(f"Error: {fetcher.error}", "error")
+                elif fetcher.manga_name and fetcher.chapters:
+                    # Add to history first
+                    self.history_manager.add_manga(fetcher.manga_name, url, site_type)
+                    
+                    # Show selection dialog (in main thread)
+                    dialog = ChapterSelectionDialog(fetcher.manga_name, fetcher.chapters, self)
+                    if dialog.exec_():
+                        selected_chapters = dialog.get_selected_chapters()
+                        if not selected_chapters:
+                            self.show_toast("No chapters selected", "info")
+                            return
+                        
+                        self.download_manager.add_to_queue(url, selected_chapters)
+                        self.add_manga_to_list(fetcher.manga_name, "Queued")
+                        self.show_toast(f"Added {fetcher.manga_name} to download queue", "success")
+                        self.url_input.clear()
+                        # Make sure queue display shows all items
+                        self.update_queue_display()
             else:
-                manga_name = webtoon_get_manga_name(url)
-                chapters = webtoon_get_chapter_links(url)
-            
-            if not chapters:
-                self.show_toast(f"No chapters found for {manga_name}", "error")
-                return
-            
-            dialog = ChapterSelectionDialog(manga_name, chapters, self)
-            if dialog.exec_():
-                selected_chapters = dialog.get_selected_chapters()
-                if not selected_chapters:
-                    self.show_toast("No chapters selected", "info")
-                    return
-                
-                self.download_manager.add_to_queue(url, selected_chapters)
-                
-                self.add_manga_to_list(manga_name, "Queued")
-                self.show_toast(f"Added {manga_name} to download queue", "success")
-                
-                self.url_input.clear()
-        except Exception as e:
-            self.show_toast(f"Error: {str(e)}", "error")
+                # Thread still running, check again in 100ms
+                QTimer.singleShot(100, check_fetcher)
+        
+        # Start checking
+        QTimer.singleShot(100, check_fetcher)
     
+    def on_chapter_completed(self, manga_name, chapter_num, path):
+        """Handle completed chapter download with proper status updates"""
+        print(f"Chapter completed: {manga_name} - Chapter {chapter_num}")
+        self.update_chapter_status(manga_name, chapter_num, "Completed", 100, path)
+        
+        # Add to history
+        if path and os.path.exists(path):
+            manga_data = self.history_manager.get_manga_data(manga_name)
+            site_type = manga_data.get('site_type', '')
+            chapter_url = ""
+            self.history_manager.add_downloaded_chapter(manga_name, chapter_num, site_type, chapter_url)
+            
+            # If chapter panel is open for this manga, refresh it
+            if hasattr(self, '_last_displayed_manga') and self._last_displayed_manga == manga_name:
+                self.display_manga_chapters(manga_name)
+
     def add_manga_to_list(self, manga_name, status="Queued"):
         """Add a manga to the downloads list with progress bar"""
         for i in range(self.downloads_layout.count()):
@@ -1007,29 +2255,12 @@ class MangaDownloaderApp(QMainWindow):
         
         list_item.pause_clicked.connect(self.toggle_pause_download)
         
-        list_item.clicked.connect(self.display_chapter_details)
+        list_item.clicked.connect(self.display_manga_chapters)
         
         self.downloads_layout.addWidget(list_item)
         
         self.manga_status[manga_name] = status
-    
-    def toggle_pause_download(self, manga_name, is_paused):
-        """Toggle the pause state of a download"""
-        if is_paused:
-            self.download_manager.pause_download(manga_name)
-        else:
-            self.download_manager.resume_download(manga_name)
-    
-    def update_manga_status(self, manga_name, status):
-        """Update manga status in the UI"""
-        self.manga_status[manga_name] = status
-        
-        for i in range(self.downloads_layout.count()):
-            item = self.downloads_layout.itemAt(i).widget()
-            if isinstance(item, DownloadListItemWidget) and item.manga_name == manga_name:
-                item.update_status(status)
-                break
-    
+
     def update_chapter_status(self, manga_name, chapter_num, status, progress=None, path=None):
         """Update chapter status in both data model and UI without full redraw"""
         if manga_name not in self.chapter_status:
@@ -1044,228 +2275,90 @@ class MangaDownloaderApp(QMainWindow):
                 self.chapter_progress[manga_name] = {}
             self.chapter_progress[manga_name][chapter_num] = progress
         
-        if self.chapter_details_title.text().startswith(manga_name):
-            for i in range(self.chapter_list.count()):
-                item = self.chapter_list.item(i)
-                item_text = item.text()
-
-                if f"Chapter {chapter_num}" in item_text:
-                    if status == "Completed":
-                        item.setText(f"Chapter {chapter_num} - Completed")
-                        item.setForeground(QColor("#4CAF50"))  # Green
-                    elif status == "Downloading":
-                        item.setText(f"Chapter {chapter_num} - Downloading ({progress}%)")
-                        item.setForeground(QColor("#2196F3"))  # Blue
-                    elif status == "Failed":
-                        item.setText(f"Chapter {chapter_num} - Failed")
-                        item.setForeground(QColor("#F44336"))  # Red
-                    else:
-                        item.setText(f"Chapter {chapter_num} - {status}")
-                        item.setForeground(QColor("#9E9E9E"))  # Gray
-                    
+        if hasattr(self, 'chapter_list_layout') and self.chapter_details_title.text().startswith(manga_name):
+            # Search through the chapter_list_layout to find the matching chapter item
+            for i in range(self.chapter_list_layout.count()):
+                item = self.chapter_list_layout.itemAt(i).widget()
+                if isinstance(item, ChapterListItem) and item.chapter_num == chapter_num:
+                    item.update_status("completed" if status == "Completed" else 
+                                       "downloading" if status == "Downloading" else 
+                                       "failed" if status == "Failed" else "unknown")
                     return
             
+            # If chapter panel is open but we didn't find the chapter, refresh the whole panel
             if hasattr(self, '_last_displayed_manga'):
                 delattr(self, '_last_displayed_manga')
-            self.display_chapter_details(manga_name)
+            self.display_manga_chapters(manga_name)
 
-    def display_chapter_details(self, manga_name):
-        """Display all chapters for the specified manga, including those not in download queue"""
-        if hasattr(self, '_last_displayed_manga') and self._last_displayed_manga == manga_name:
-            return
-        
-        self._last_displayed_manga = manga_name
-        print(f"Displaying chapters for: {manga_name}")
-
-        self.chapter_details_title.setText(f"{manga_name} - Chapters")
-
-        self.chapter_list.clear()
-
-        loading_item = QListWidgetItem("Loading chapters...")
-        self.chapter_list.addItem(loading_item)
-        QApplication.processEvents()
-        
-        manga_url = None
-        manga_site_type = None
-        for item in self.download_manager.download_queue_list:
-            if item['manga_name'] == manga_name:
-                manga_url = item['url']
-                manga_site_type = item['site_type']
-                break
-        
-        if manga_url and manga_site_type:
-            try:
-                all_chapters = []
-                if manga_site_type == "asura":
-                    all_chapters = asura_get_chapter_links(manga_url)
-                elif manga_site_type == "katana":
-                    all_chapters = katana_get_chapter_links(manga_url)
-                else:  
-                    all_chapters = webtoon_get_chapter_links(manga_url)
-                
-                self.chapter_list.clear()
-                
-                if not all_chapters:
-                    item = QListWidgetItem("No chapters found")
-                    self.chapter_list.addItem(item)
-                    return
-                    
-                chapter_dict = {}
-                for chapter_num, chapter_name, chapter_url in all_chapters:
-                    chapter_dict[chapter_num] = {
-                        'name': chapter_name,
-                        'url': chapter_url,
-                        'status': "Available"
-                    }
-                
-                if manga_name in self.chapter_status:
-                    for ch_num, status in self.chapter_status[manga_name].items():
-                        if ch_num in chapter_dict:
-                            chapter_dict[ch_num]['status'] = status
-                
-                sorted_chapters = sorted(
-                    chapter_dict.items(), 
-                    key=lambda x: float(x[0]) if x[0].replace('.', '', 1).isdigit() else 0
-                )
-                
-                for chapter_num, data in sorted_chapters:
-                    status = data['status']
-                    chapter_name = data['name']
-                    
-                    if status == "Completed":
-                        item = QListWidgetItem(f"Chapter {chapter_num}: {chapter_name} - Completed")
-                        item.setForeground(QColor("#4CAF50"))  # Green
-                    elif status == "Downloading":
-                        progress = 0
-                        if manga_name in self.chapter_progress and chapter_num in self.chapter_progress[manga_name]:
-                            progress = self.chapter_progress[manga_name][chapter_num]
-                        item = QListWidgetItem(f"Chapter {chapter_num}: {chapter_name} - Downloading ({progress}%)")
-                        item.setForeground(QColor("#2196F3"))  # Blue
-                    elif status == "Failed":
-                        item = QListWidgetItem(f"Chapter {chapter_num}: {chapter_name} - Failed")
-                        item.setForeground(QColor("#F44336"))  # Red
-                    elif status == "Queued":
-                        item = QListWidgetItem(f"Chapter {chapter_num}: {chapter_name} - Queued")
-                        item.setForeground(QColor("#9E9E9E"))  # Gray
-                    else:
-                        item = QListWidgetItem(f"Chapter {chapter_num}: {chapter_name}")
-                        item.setForeground(QColor("#000000"))  # Black
-                    
-                    self.chapter_list.addItem(item)
-                
-                return
-                    
-            except Exception as e:
-                self.chapter_list.clear()
-                item = QListWidgetItem(f"Error loading chapters: {str(e)}")
-                item.setForeground(QColor("#F44336"))  # Red
-                self.chapter_list.addItem(item)
-                return
-        
-        if manga_name in self.chapter_status:
-            try:
-                for chapter_num, status in sorted(self.chapter_status[manga_name].items(), 
-                                                key=lambda x: float(x[0]) if x[0].replace('.', '', 1).isdigit() else 0):
-                    if status == "Completed":
-                        item = QListWidgetItem(f"Chapter {chapter_num} - Completed")
-                        item.setForeground(QColor("#4CAF50"))  # Green
-                    elif status == "Downloading":
-                        progress = 0
-                        if manga_name in self.chapter_progress and chapter_num in self.chapter_progress[manga_name]:
-                            progress = self.chapter_progress[manga_name][chapter_num]
-                        item = QListWidgetItem(f"Chapter {chapter_num} - Downloading ({progress}%)")
-                        item.setForeground(QColor("#2196F3"))  # Blue
-                    elif status == "Failed":
-                        item = QListWidgetItem(f"Chapter {chapter_num} - Failed")
-                        item.setForeground(QColor("#F44336"))  # Red
-                    else:
-                        item = QListWidgetItem(f"Chapter {chapter_num} - {status}")
-                        item.setForeground(QColor("#9E9E9E"))  # Gray
-                    
-                    self.chapter_list.addItem(item)
-            except Exception as e:
-                print(f"Error displaying chapters: {e}")
-                item = QListWidgetItem(f"Error displaying chapters: {str(e)}")
-                item.setForeground(QColor("#F44336"))  # Red
-                self.chapter_list.addItem(item)
+    def toggle_pause_download(self, manga_name, is_paused):
+        """Toggle the pause state of a download"""
+        if is_paused:
+            self.download_manager.pause_download(manga_name)
         else:
-            item = QListWidgetItem("No chapter data available for this manga")
-            self.chapter_list.addItem(item)
-    
-    def on_manga_clicked(self, item):
-        manga_name = item.data(Qt.UserRole)
-        self.display_chapter_details(manga_name)
-    
-    def show_toast(self, message, type="info"):
-        toast = Toast(self)
-        toast.show_message(message, type)
+            self.download_manager.resume_download(manga_name)
 
     def on_manga_started(self, manga_name):
-        self.update_manga_status(manga_name, "Downloading")
-    
+        """Handle manga download started signal"""
+        self.add_manga_to_list(manga_name, "Downloading")
+
     def on_manga_completed(self, manga_name):
+        """Handle manga download completed signal"""
         self.update_manga_status(manga_name, "Completed")
-    
+
     def on_manga_failed(self, manga_name, reason):
+        """Handle manga download failed signal"""
         self.update_manga_status(manga_name, "Failed")
         self.show_toast(f"Failed to download {manga_name}: {reason}", "error")
-    
-    def on_chapter_started(self, manga_name, chapter_num):
-        self.update_chapter_status(manga_name, chapter_num, "Downloading", 0)
-    
-    def on_chapter_progress(self, manga_name, chapter_num, progress):
-        """Handle chapter download progress updates with forced UI refresh"""
-        print(f"Progress update: {manga_name} - Chapter {chapter_num}: {progress}%")
 
+    def on_chapter_started(self, manga_name, chapter_num):
+        """Handle chapter download started signal"""
+        self.update_chapter_status(manga_name, chapter_num, "Downloading", 0)
+
+    def on_chapter_progress(self, manga_name, chapter_num, progress):
+        """Handle chapter progress signal"""
         self.update_chapter_status(manga_name, chapter_num, "Downloading", progress)
 
-        QApplication.processEvents()
-    
-    def on_chapter_completed(self, manga_name, chapter_num, path):
-        """Handle completed chapter download with proper status updates"""
-        print(f"Chapter completed: {manga_name} - Chapter {chapter_num}")
-        self.update_chapter_status(manga_name, chapter_num, "Completed", 100, path)
-    
     def on_chapter_failed(self, manga_name, chapter_num, reason):
-        """Handle a failed chapter download with proper error messaging"""
-        print(f"Chapter failed: {manga_name} - Chapter {chapter_num} - {reason}")
+        """Handle chapter download failed signal"""
         self.update_chapter_status(manga_name, chapter_num, "Failed")
+        self.show_toast(f"Failed to download {manga_name} Chapter {chapter_num}: {reason}", "error")
+
+    def update_manga_status(self, manga_name, status):
+        """Update manga status in the UI"""
+        self.manga_status[manga_name] = status
         
-        if "doesn't exist" not in reason.lower() and "no file created" not in reason.lower():
-            self.show_toast(f"Failed to download {manga_name} Chapter {chapter_num}: {reason}", "error")
-    
-    def on_manga_progress(self, manga_name, progress):
-        """Update manga overall progress"""
         for i in range(self.downloads_layout.count()):
             item = self.downloads_layout.itemAt(i).widget()
             if isinstance(item, DownloadListItemWidget) and item.manga_name == manga_name:
-                item.update_progress(progress)
+                item.update_status(status)
                 break
-    
+
     def cancel_download(self, manga_name):
         """Cancel a download"""
         self.download_manager.cancel_download(manga_name)
-    
+
     def on_download_cancelled(self, manga_name):
-        """Handle cancelled download"""
+        """Handle download cancelled signal"""
         self.update_manga_status(manga_name, "Cancelled")
-    
+
     def on_download_paused(self, manga_name):
         """Handle download paused signal"""
         for i in range(self.downloads_layout.count()):
             item = self.downloads_layout.itemAt(i).widget()
             if isinstance(item, DownloadListItemWidget) and item.manga_name == manga_name:
+                item.set_paused(True)
                 item.update_status("Paused")
                 break
-    
+
     def on_download_resumed(self, manga_name):
         """Handle download resumed signal"""
         for i in range(self.downloads_layout.count()):
             item = self.downloads_layout.itemAt(i).widget()
             if isinstance(item, DownloadListItemWidget) and item.manga_name == manga_name:
+                item.set_paused(False)
                 item.update_status("Downloading")
                 break
-    
+
     def clear_completed_downloads(self):
         """Remove completed downloads from the UI"""
         for i in range(self.downloads_layout.count() - 1, -1, -1):
@@ -1273,7 +2366,7 @@ class MangaDownloaderApp(QMainWindow):
             if isinstance(item, DownloadListItemWidget) and item.status in ["Completed", "Failed", "Cancelled"]:
                 self.downloads_layout.removeWidget(item)
                 item.deleteLater()
-    
+
     def update_queue_display(self):
         """Update the queue display to show pending downloads"""
         queue = self.download_manager.get_queue()
@@ -1282,62 +2375,77 @@ class MangaDownloaderApp(QMainWindow):
             self.queue_status_label.setText("No downloads in queue")
         else:
             self.queue_status_label.setText(f"{len(queue)} downloads in queue")
+            
+            # Add all queued manga to the display list
+            for item in queue:
+                manga_name = item['manga_name']
+                
+                # Check if already in the list
+                found = False
+                for i in range(self.downloads_layout.count()):
+                    widget = self.downloads_layout.itemAt(i).widget()
+                    if isinstance(widget, DownloadListItemWidget) and widget.manga_name == manga_name:
+                        found = True
+                        break
+                
+                # If not in the list, add it with "Queued" status
+                if not found:
+                    self.add_manga_to_list(manga_name, "Queued")
+
+    def show_toast(self, message, type="info"):
+        """Show a toast notification"""
+        toast = Toast(self)
+        toast.show_message(message, type)
     
-    def save_history(self):
-        """Save download history to file"""
-        try:
-            with open("download_history.txt", "a") as f:
-                for manga_name, status in self.manga_status.items():
-                    f.write(f"{manga_name}: {status}\n")
-            self.show_toast("History saved", "success")
-        except Exception as e:
-            self.show_toast(f"Error saving history: {str(e)}", "error")
+    def on_manga_progress(self, manga_name, progress):
+        """Handle manga overall progress updates"""
+        for i in range(self.downloads_layout.count()):
+            item = self.downloads_layout.itemAt(i).widget()
+            if isinstance(item, DownloadListItemWidget) and item.manga_name == manga_name:
+                item.update_progress(progress)
+                break
+
+    def hide_chapter_panel(self):
+        """Hide the chapter details panel"""
+        # Set a flag to indicate we're closing the panel
+        self.chapter_panel.setProperty("closing", True)
+        
+        # Run the animation to smoothly hide the panel
+        self.animate_chapter_panel_hide()
+        
+        # Force the panel to close completely after animation
+        QTimer.singleShot(300, self._ensure_panel_closed)
     
-    def browse_for_path(self):
-        """Open file dialog to select download directory"""
-        path = QFileDialog.getExistingDirectory(
-            self,
-            "Select Download Folder",
-            self.download_path,
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
+    def _ensure_panel_closed(self):
+        """Make sure the panel is closed completely"""
+        self.chapter_panel.setMinimumWidth(0)
+        self.chapter_panel.setMaximumWidth(0)
+        self.chapter_panel.updateGeometry()
+        self.chapter_panel.setProperty("closing", False)
+
+    def animate_chapter_panel_show(self):
+        """Show chapter panel with animation"""
+        # Don't show if already closing
+        if self.chapter_panel.property("closing"):
+            return
+            
+        self.chapter_panel.setMaximumWidth(350)
         
-        if path:
-            self.download_path = path
-            self.path_input.setText(path)
-            self.save_download_path()
-            self.download_manager.download_path = self.download_path
+        animation = QPropertyAnimation(self.chapter_panel, b"minimumWidth")
+        animation.setDuration(250)
+        animation.setStartValue(0)
+        animation.setEndValue(350)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.start()
 
-    def on_path_changed(self, path):
-        """Handle when user types or pastes a path"""
-        if os.path.isdir(path):
-            self.download_path = path
-            self.save_download_path()
-            self.download_manager.download_path = self.download_path
-
-    def save_download_path(self):
-        """Save download path to a config file"""
-        config_dir = os.path.join(os.path.expanduser("~"), ".mangadownloader")
-        os.makedirs(config_dir, exist_ok=True)
-        
-        config_path = os.path.join(config_dir, "config.txt")
-        with open(config_path, "w") as f:
-            f.write(f"download_path={self.download_path}")
-
-    def load_download_path(self):
-        """Load download path from config if available"""
-        config_path = os.path.join(os.path.expanduser("~"), ".mangadownloader", "config.txt")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r") as f:
-                    for line in f:
-                        if line.startswith("download_path="):
-                            path = line.strip().split("=", 1)[1]
-                            if os.path.isdir(path):
-                                self.download_path = path
-                                break
-            except Exception as e:
-                print(f"Error loading config: {e}")
+    def animate_chapter_panel_hide(self):
+        """Hide chapter panel with animation"""
+        animation = QPropertyAnimation(self.chapter_panel, b"minimumWidth")
+        animation.setDuration(250)
+        animation.setStartValue(self.chapter_panel.width())
+        animation.setEndValue(0)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.start()
 
 def main():
     app = QApplication(sys.argv)
@@ -1347,4 +2455,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

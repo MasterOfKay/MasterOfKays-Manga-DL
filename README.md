@@ -19,6 +19,9 @@ A Python-based manga downloader that supports downloading from multiple manga si
 - ✔ Pause and resume downloads
 - ✔ Custom download path selection
 - ✔ Multi-language support for Webtoon
+- ✔ Download history tracking
+- ✔ Easy new chapter detection and download
+- ✔ Modern, redesigned user interface
 
 ## Installation
 
@@ -192,3 +195,15 @@ Feel free to:
 ## License
 
 This project is for educational purposes only. Use responsibly and respect copyright laws.
+
+## Upcoming Features
+
+The following features are planned for future updates:
+
+- 🌙 **Dark Mode** - A sleek dark theme for comfortable nighttime usage
+- 🔍 **Debugger Tool** - For easier problem identification and resolution
+- 📊 **Enhanced Download Statistics** - Track your manga collection growth
+- 🔄 **Auto-Update Checker** - Be notified when new versions are available
+- 🔔 **New Chapter Notifications** - Get alerts when new chapters are available for your favorite manga
+
+Have a feature suggestion? Feel free to open an issue or contribute to the project!
