@@ -1,12 +1,13 @@
 import requests
 from bs4 import BeautifulSoup
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Union
 import re
 import os
 import zipfile
 from io import BytesIO
 import time
 import logging
+import json
 
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(levelname)s - %(message)s',
@@ -96,8 +97,10 @@ def get_chapter_links(url: str) -> List[Tuple[str, str, str]]:
         logger.exception(f"Error fetching chapters: {e}")
         return []
 
-def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_path: str = None) -> str:
-    """Download a MangaKatana chapter and create a CBZ file with robust error handling"""
+def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_path: str = None) -> Dict[str, Union[str, bool]]:
+    """Download a MangaKatana chapter and create a CBZ file with robust error handling.
+    Returns a dictionary with the path to the CBZ file and the chapter URL for history tracking.
+    """
     try:
         chapter_num = str(chapter_num).strip()
         
@@ -117,7 +120,7 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_p
         if os.path.exists(cbz_path):
             if os.path.getsize(cbz_path) > 0:
                 print(f"Chapter {chapter_num} already exists, skipping...")
-                return cbz_path
+                return {"path": cbz_path, "url": chapter_url, "success": True}
             else:
                 print(f"Found empty file for Chapter {chapter_num}, removing and redownloading...")
                 os.remove(cbz_path)
@@ -151,16 +154,26 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_p
 
         image_urls = []
         
-        thzq_match = re.search(r'var\s+thzq\s*=\s*\[(.*?)\];', response.text, re.DOTALL)
-        if thzq_match:
-            urls_text = thzq_match.group(1)
-            raw_urls = urls_text.split(',')
-            for url in raw_urls:
-                if 'http' in url:
-                    clean_url = url.strip().strip('"').strip("'").strip()
-                    if clean_url and 'about:blank' not in clean_url and '#' not in clean_url:
-                        image_urls.append(clean_url)
-            logger.info(f"Method 1: Found {len(image_urls)} image URLs")
+        js_patterns = [
+            r'var\s+thzq\s*=\s*\[(.*?)\];',
+            r'var\s+chapImages\s*=\s*\[(.*?)\];',
+            r'var\s+images\s*=\s*\[(.*?)\];',
+            r'var\s+pages\s*=\s*\[(.*?)\];',
+            r'"images"\s*:\s*\[(.*?)\]',
+        ]
+        
+        for pattern in js_patterns:
+            matches = re.search(pattern, response.text, re.DOTALL)
+            if matches:
+                urls_text = matches.group(1)
+                raw_urls = re.findall(r'["\'](https?://[^"\']+)["\']', urls_text)
+                for url in raw_urls:
+                    if url and 'about:blank' not in url and '#' not in url:
+                        image_urls.append(url)
+                
+                if image_urls:
+                    logger.info(f"Method 1: Found {len(image_urls)} image URLs using pattern: {pattern}")
+                    break
         
         if not image_urls:
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -169,16 +182,23 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_p
                 'div#imgs div.uk-grid.uk-grid-collapse', 
                 'div.img-content div.reading-content',
                 'div#imgs',
-                'div.chapter-content'
+                'div.chapter-content',
+                'div.reading-content',
+                'div.read-container',
+                'div.viewer-container',
+                'div.chapter-images',
+                'div.manga-reading-box',
             ]
             
             for selector in selectors:
                 imgs_container = soup.select_one(selector)
                 if imgs_container:
                     for img in imgs_container.find_all('img'):
-                        src = img.get('data-src') or img.get('src')
-                        if src and 'http' in src and 'about:blank' not in src and '#' not in src:
-                            image_urls.append(src)
+                        for attr in ['data-src', 'src', 'data-lazy-src', 'data-original', 'data-lazy', 'data-url']:
+                            src = img.get(attr)
+                            if src and 'http' in src and 'about:blank' not in src and '#' not in src:
+                                image_urls.append(src)
+                                break
                     
                     if image_urls:
                         logger.info(f"Method 2: Found {len(image_urls)} image URLs using selector: {selector}")
@@ -187,21 +207,70 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_p
         if not image_urls:
             all_img_tags = soup.find_all('img')
             for img in all_img_tags:
-                src = img.get('data-src') or img.get('src')
-                if src and 'http' in src and 'about:blank' not in src and '#' not in src:
-                    if any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
-                        image_urls.append(src)
+                for attr in ['data-src', 'src', 'data-lazy-src', 'data-original', 'data-lazy', 'data-url']:
+                    src = img.get(attr)
+                    if src and 'http' in src and 'about:blank' not in src and '#' not in src:
+                        if any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                            image_urls.append(src)
+                            break
             
             logger.info(f"Method 3: Found {len(image_urls)} image URLs")
 
         if not image_urls:
-            logger.error("No images found in chapter. Saving HTML for debugging.")
-            debug_path = os.path.join(base_dir, f"debug_chapter_{chapter_num}.html")
-            with open(debug_path, 'w', encoding='utf-8') as f:
-                f.write(response.text)
-            raise Exception(f"No images found in chapter. Debug HTML saved to {debug_path}")
+            script_tags = soup.find_all('script')
+            for script in script_tags:
+                if script.string:
+                    json_matches = re.findall(r'({[^}]+images[^}]+})', script.string)
+                    for json_str in json_matches:
+                        try:
+                            json_str = re.sub(r'([{,])\s*(\w+):', r'\1"\2":', json_str)
+                            data = json.loads(json_str)
+                            if 'images' in data and isinstance(data['images'], list):
+                                for img in data['images']:
+                                    if isinstance(img, str) and 'http' in img:
+                                        image_urls.append(img)
+                                    elif isinstance(img, dict) and 'url' in img and 'http' in img['url']:
+                                        image_urls.append(img['url'])
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+            
+            if image_urls:
+                logger.info(f"Method 4: Found {len(image_urls)} image URLs from JSON in scripts")
+
+        cleaned_urls = []
+        seen_urls = set()
+        for url in image_urls:
+            url = url.strip()
+            bg_match = re.search(r'url\([\'"]?(.*?)[\'"]?\)', url)
+            if bg_match:
+                url = bg_match.group(1)
+            
+            if 'icon' in url.lower() or 'logo' in url.lower():
+                continue
+                
+            if url not in seen_urls:
+                seen_urls.add(url)
+                cleaned_urls.append(url)
+        
+        image_urls = cleaned_urls
+        
+        if not image_urls:
+            logger.error("No images found in chapter.")
+            raise Exception("No images found in chapter.")
 
         logger.info(f"Found {len(image_urls)} images for chapter {chapter_num}")
+        
+        try:
+            def get_url_number(url):
+                name_match = re.search(r'(\d+)\.(jpg|jpeg|png|webp|gif)', url.lower())
+                if name_match:
+                    return int(name_match.group(1))
+                return 0
+            
+            if all(get_url_number(url) > 0 for url in image_urls):
+                image_urls.sort(key=get_url_number)
+        except Exception as sort_error:
+            logger.warning(f"Could not sort image URLs naturally: {sort_error}")
         
         with zipfile.ZipFile(cbz_path, 'w') as cbz:
             for idx, img_url in enumerate(image_urls, 1):
@@ -229,13 +298,37 @@ def download_chapter(chapter_url: str, chapter_num: str, manga_name: str, base_p
         if os.path.getsize(cbz_path) < 1000:
             logger.error("CBZ file is too small, likely empty")
             os.remove(cbz_path)
-            return ""
+            return {"path": "", "url": chapter_url, "success": False}
             
         logger.info(f"Successfully created CBZ for chapter {chapter_num}")
-        return cbz_path
+        return {"path": cbz_path, "url": chapter_url, "success": True}
 
     except Exception as e:
         logger.exception(f"Error downloading chapter {chapter_num}: {e}")
-        if os.path.exists(cbz_path):
+        if 'cbz_path' in locals() and os.path.exists(cbz_path):
             os.remove(cbz_path)
-        return ""
+        return {"path": "", "url": chapter_url, "success": False}
+
+def check_for_updates(manga_url: str, current_chapters: List[str]) -> List[Tuple[str, str, str]]:
+    """Check if there are new chapters available
+    Returns a list of new chapters that are not in current_chapters
+    """
+    try:
+        all_chapters = get_chapter_links(manga_url)
+        if not all_chapters:
+            logger.warning(f"No chapters found for {manga_url}")
+            return []
+            
+        current_chapters_set = {str(ch) for ch in current_chapters}
+        
+        new_chapters = [ch for ch in all_chapters if str(ch[0]) not in current_chapters_set]
+        
+        if new_chapters:
+            logger.info(f"Found {len(new_chapters)} new chapters")
+        else:
+            logger.info("No new chapters found")
+            
+        return new_chapters
+    except Exception as e:
+        logger.exception(f"Error checking for updates: {e}")
+        return []
