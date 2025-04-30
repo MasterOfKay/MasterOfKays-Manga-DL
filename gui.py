@@ -640,19 +640,24 @@ class Toast(QDialog):
         
         self.setStyleSheet("")
         
+        palette = QPalette()
+        
         if type == "error":
             self.setStyleSheet("""
                 QDialog#toastDialog {
                     background-color: white !important;
                     border: 2px solid #E53935 !important;
                     border-radius: 10px !important;
+                    color: #E53935 !important;
                 }
                 QDialog#toastDialog QLabel#title_label {
                     color: #E53935 !important;
                     font-weight: bold !important;
+                    background-color: transparent !important;
                 }
                 QDialog#toastDialog QLabel {
                     color: #E53935 !important;
+                    background-color: transparent !important;
                 }
                 QDialog#toastDialog QPushButton {
                     color: #E53935 !important;
@@ -671,6 +676,11 @@ class Toast(QDialog):
                     background-color: rgba(229, 57, 53, 0.4) !important;
                 }
             """)
+            
+            palette.setColor(QPalette.Window, QColor("white"))
+            palette.setColor(QPalette.WindowText, QColor("#E53935"))
+            self.setPalette(palette)
+            
             duration = 30000
         elif type == "success":
             self.setStyleSheet("""
@@ -680,12 +690,18 @@ class Toast(QDialog):
                 }
                 QDialog#toastDialog QLabel {
                     color: white !important;
+                    background-color: transparent !important;
                 }
                 QDialog#toastDialog QPushButton {
                     color: white !important;
+                    background-color: rgba(255, 255, 255, 0.2) !important;
                 }
             """)
             self.title_label.setText("Success")
+            
+            palette.setColor(QPalette.Window, QColor("#43A047"))
+            palette.setColor(QPalette.WindowText, QColor("white"))
+            self.setPalette(palette)
         else:
             self.setStyleSheet("""
                 QDialog#toastDialog {
@@ -694,12 +710,20 @@ class Toast(QDialog):
                 }
                 QDialog#toastDialog QLabel {
                     color: white !important;
+                    background-color: transparent !important;
                 }
                 QDialog#toastDialog QPushButton {
                     color: white !important;
+                    background-color: rgba(255, 255, 255, 0.2) !important;
                 }
             """)
             self.title_label.setText("Information")
+            
+            palette.setColor(QPalette.Window, QColor("#2196F3"))
+            palette.setColor(QPalette.WindowText, QColor("white"))
+            self.setPalette(palette)
+        
+        self.setPalette(palette)
         
         if self.parent():
             parent_rect = self.parent().geometry()
@@ -712,6 +736,10 @@ class Toast(QDialog):
                                               parent_rect.height() - height - 20))
             
             self.setGeometry(x, y, width, height)
+        
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
         
         self.show()
         self.timer.start(duration)
@@ -1803,7 +1831,7 @@ class MangaDownloaderApp(QMainWindow):
             self,
             "About MasterOfKay's Manga Downloader",
             """
-            <h3>MasterOfKay's Manga Downloader v Test-1.4</h3>
+            <h3>MasterOfKay's Manga Downloader v Test-1.4.1</h3>
             <p>Download manga from popular sites with history tracking.</p>
             <p>Supported sites:</p>
             <ul>
