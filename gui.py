@@ -11,7 +11,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QProgressBar, QScrollArea, QFrame, QMessageBox,
                             QTabWidget, QListWidget, QListWidgetItem, QDialog,
                             QCheckBox, QSpinBox, QGridLayout, QAction, QFileDialog,
-                            QSplitter, QToolButton, QMenu, QSizePolicy, QStackedWidget)
+                            QSplitter, QToolButton, QMenu, QSizePolicy, QStackedWidget,
+                            QGroupBox, QColorDialog)
 from PyQt5.QtCore import Qt, QObject, pyqtSignal, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QFont, QColor, QMouseEvent, QIcon, QPalette, QBrush, QPixmap
 
@@ -586,6 +587,7 @@ class DownloadManager:
 class Toast(QDialog):
     def __init__(self, parent=None):
         super(Toast, self).__init__(parent, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setObjectName("toastDialog")
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.close)
         
@@ -595,6 +597,7 @@ class Toast(QDialog):
         top_bar = QHBoxLayout()
         
         self.title_label = QLabel("")
+        self.title_label.setObjectName("title_label")
         self.title_label.setFont(QFont("Arial", 10, QFont.Bold))
         top_bar.addWidget(self.title_label)
         
@@ -635,67 +638,69 @@ class Toast(QDialog):
     def show_message(self, message, type="info", duration=3000):
         self.message_label.setText(message)
         
+        self.setStyleSheet("")
+        
         if type == "error":
             self.setStyleSheet("""
-                QDialog {
-                    background-color: white;
-                    border: 2px solid #E53935;
-                    border-radius: 10px;
+                QDialog#toastDialog {
+                    background-color: white !important;
+                    border: 2px solid #E53935 !important;
+                    border-radius: 10px !important;
                 }
-                QLabel#title_label {
-                    color: #E53935;
-                    font-weight: bold;
+                QDialog#toastDialog QLabel#title_label {
+                    color: #E53935 !important;
+                    font-weight: bold !important;
                 }
-                QLabel {
-                    color: #E53935;
+                QDialog#toastDialog QLabel {
+                    color: #E53935 !important;
                 }
-                QPushButton {
-                    color: #E53935;
+                QDialog#toastDialog QPushButton {
+                    color: #E53935 !important;
                 }
             """)
             self.title_label.setText("Error")
             self.close_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: rgba(229, 57, 53, 0.2);
-                    color: #E53935;
-                    border-radius: 15px;
-                    font-size: 16px;
-                    font-weight: bold;
+                QDialog#toastDialog QPushButton {
+                    background-color: rgba(229, 57, 53, 0.2) !important;
+                    color: #E53935 !important;
+                    border-radius: 15px !important;
+                    font-size: 16px !important;
+                    font-weight: bold !important;
                 }
-                QPushButton:hover {
-                    background-color: rgba(229, 57, 53, 0.4);
+                QDialog#toastDialog QPushButton:hover {
+                    background-color: rgba(229, 57, 53, 0.4) !important;
                 }
             """)
             duration = 30000
         elif type == "success":
             self.setStyleSheet("""
-                QDialog {
-                    background-color: #43A047;
-                    border-radius: 10px;
+                QDialog#toastDialog {
+                    background-color: #43A047 !important;
+                    border-radius: 10px !important;
                 }
-                QLabel {
-                    color: white;
+                QDialog#toastDialog QLabel {
+                    color: white !important;
                 }
-                QPushButton {
-                    color: white;
+                QDialog#toastDialog QPushButton {
+                    color: white !important;
                 }
             """)
             self.title_label.setText("Success")
         else:
             self.setStyleSheet("""
-                QDialog {
-                    background-color: #2196F3;
-                    border-radius: 10px;
+                QDialog#toastDialog {
+                    background-color: #2196F3 !important;
+                    border-radius: 10px !important;
                 }
-                QLabel {
-                    color: white;
+                QDialog#toastDialog QLabel {
+                    color: white !important;
                 }
-                QPushButton {
-                    color: white;
+                QDialog#toastDialog QPushButton {
+                    color: white !important;
                 }
             """)
             self.title_label.setText("Information")
-            
+        
         if self.parent():
             parent_rect = self.parent().geometry()
             width = min(400, parent_rect.width() - 40)
@@ -735,7 +740,6 @@ class SidebarButton(QToolButton):
                 border-radius: 0px;
                 text-align: left;
                 padding: 10px;
-                color: #333;
                 font-weight: bold;
             }
             QToolButton:hover {
@@ -768,13 +772,13 @@ class Sidebar(QWidget):
         self.history_btn.clicked.connect(lambda: self.itemClicked.emit("history"))
         
         logo_label = QLabel("MasterOfKay's\nMangaDL")
+        logo_label.setObjectName("sidebar_logo")
         logo_label.setStyleSheet("""
-            QLabel {
+            QLabel#sidebar_logo {
                 color: #2196F3;
                 font-size: 18px;
                 font-weight: bold;
                 padding: 15px;
-                background-color: #f5f5f5;
             }
         """)
         
@@ -1299,6 +1303,11 @@ class MangaDownloaderApp(QMainWindow):
         self.download_path = os.path.abspath(os.getcwd())
         self.load_download_path()
         
+        self.bg_color = QColor(240, 240, 240)
+        self.text_color = QColor(51, 51, 51)
+        self.is_dark_mode = False
+        self.load_theme_settings()
+        
         self.signals = DownloadSignals()
         self.download_manager = DownloadManager(self.signals)
         self.history_manager = self.download_manager.history_manager
@@ -1344,6 +1353,24 @@ class MangaDownloaderApp(QMainWindow):
             except Exception as e:
                 print(f"Error loading config: {e}")
     
+    def load_theme_settings(self):
+        """Load theme settings from config if available"""
+        config_path = os.path.join(os.path.expanduser("~"), ".mangadownloader", "config.txt")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    for line in f:
+                        if line.startswith("dark_mode="):
+                            self.is_dark_mode = line.strip().split("=", 1)[1].lower() == "true"
+                        elif line.startswith("bg_color="):
+                            color_str = line.strip().split("=", 1)[1]
+                            self.bg_color = QColor(color_str)
+                        elif line.startswith("text_color="):
+                            color_str = line.strip().split("=", 1)[1]
+                            self.text_color = QColor(color_str)
+            except Exception as e:
+                print(f"Error loading theme settings: {e}")
+    
     def save_download_path(self):
         """Save download path to a config file"""
         config_dir = os.path.join(os.path.expanduser("~"), ".mangadownloader")
@@ -1351,8 +1378,11 @@ class MangaDownloaderApp(QMainWindow):
         
         config_path = os.path.join(config_dir, "config.txt")
         with open(config_path, "w") as f:
-            f.write(f"download_path={self.download_path}")
-    
+            f.write(f"download_path={self.download_path}\n")
+            f.write(f"dark_mode={self.is_dark_mode}\n")
+            f.write(f"bg_color={self.bg_color.name()}\n")
+            f.write(f"text_color={self.text_color.name()}\n")
+            
     def on_path_changed(self, path):
         """Handle when user types or pastes a path"""
         if os.path.isdir(path):
@@ -1368,12 +1398,31 @@ class MangaDownloaderApp(QMainWindow):
             self.download_path,
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
         )
+    
+    def save_theme_settings(self):
+        """Save theme settings to config file"""
+        config_dir = os.path.join(os.path.expanduser("~"), ".mangadownloader")
+        os.makedirs(config_dir, exist_ok=True)
         
-        if path:
-            self.download_path = path
-            self.path_input.setText(path)
-            self.save_download_path()
-            self.download_manager.download_path = self.download_path
+        config_path = os.path.join(config_dir, "config.txt")
+        existing_config = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    for line in f:
+                        if "=" in line:
+                            key, value = line.strip().split("=", 1)
+                            existing_config[key] = value
+            except Exception as e:
+                print(f"Error reading existing config: {e}")
+        
+        existing_config["dark_mode"] = str(self.is_dark_mode)
+        existing_config["bg_color"] = self.bg_color.name()
+        existing_config["text_color"] = self.text_color.name()
+        
+        with open(config_path, "w") as f:
+            for key, value in existing_config.items():
+                f.write(f"{key}={value}\n")
     
     def init_ui(self):
         central_widget = QWidget()
@@ -1506,6 +1555,60 @@ class MangaDownloaderApp(QMainWindow):
         settings_header.setFont(QFont("Arial", 16, QFont.Bold))
         settings_layout.addWidget(settings_header)
         
+        theme_group = QGroupBox("Appearance")
+        theme_layout = QVBoxLayout()
+        
+        dark_mode_layout = QHBoxLayout()
+        self.dark_mode_checkbox = QCheckBox("Dark Mode")
+        self.dark_mode_checkbox.setChecked(self.is_dark_mode)
+        self.dark_mode_checkbox.stateChanged.connect(self.toggle_dark_mode)
+        dark_mode_layout.addWidget(self.dark_mode_checkbox)
+        dark_mode_layout.addStretch()
+        theme_layout.addLayout(dark_mode_layout)
+        
+        bg_color_layout = QHBoxLayout()
+        bg_color_label = QLabel("Background Color:")
+        self.bg_color_preview = QPushButton()
+        self.bg_color_preview.setFixedSize(30, 30)
+        self.bg_color_preview.setCursor(Qt.PointingHandCursor)
+        self.bg_color_preview.clicked.connect(self.select_background_color)
+        self.bg_color_preview.setStyleSheet(f"background-color: {self.bg_color.name()}; border: 1px solid #777;")
+        bg_color_layout.addWidget(bg_color_label)
+        bg_color_layout.addStretch()
+        bg_color_layout.addWidget(self.bg_color_preview)
+        theme_layout.addLayout(bg_color_layout)
+        
+        text_color_layout = QHBoxLayout()
+        text_color_label = QLabel("Text Color:")
+        self.text_color_preview = QPushButton()
+        self.text_color_preview.setFixedSize(30, 30)
+        self.text_color_preview.setCursor(Qt.PointingHandCursor)
+        self.text_color_preview.clicked.connect(self.select_text_color)
+        self.text_color_preview.setStyleSheet(f"background-color: {self.text_color.name()}; border: 1px solid #777;")
+        text_color_layout.addWidget(text_color_label)
+        text_color_layout.addStretch()
+        text_color_layout.addWidget(self.text_color_preview)
+        theme_layout.addLayout(text_color_layout)
+        
+        apply_theme_btn = QPushButton("Apply Theme")
+        apply_theme_btn.clicked.connect(self.apply_theme)
+        apply_theme_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0b7dda;
+            }
+        """)
+        theme_layout.addWidget(apply_theme_btn)
+        
+        theme_group.setLayout(theme_layout)
+        settings_layout.addWidget(theme_group)
+        
         settings_layout.addStretch()
         
         self.content_stack.addWidget(downloads_page)
@@ -1573,7 +1676,100 @@ class MangaDownloaderApp(QMainWindow):
         self.create_menu_bar()
         
         self.populate_history_list()
+        
+        if self.is_dark_mode or (self.bg_color != QColor(240, 240, 240) or self.text_color != QColor(51, 51, 51)):
+            QTimer.singleShot(100, self.apply_theme)
     
+    def toggle_dark_mode(self, state):
+        """Toggle between dark and light mode"""
+        self.is_dark_mode = (state == Qt.Checked)
+        if self.is_dark_mode:
+            self.bg_color = QColor(40, 40, 40)
+            self.text_color = QColor(230, 230, 230)
+        else:
+            self.bg_color = QColor(240, 240, 240)
+            self.text_color = QColor(51, 51, 51)
+        
+        self.bg_color_preview.setStyleSheet(f"background-color: {self.bg_color.name()}; border: 1px solid #777;")
+        self.text_color_preview.setStyleSheet(f"background-color: {self.text_color.name()}; border: 1px solid #777;")
+    
+    def select_background_color(self):
+        """Open color picker for background color"""
+        color = QColorDialog.getColor(self.bg_color, self, "Select Background Color")
+        if color.isValid():
+            self.bg_color = color
+            self.bg_color_preview.setStyleSheet(f"background-color: {self.bg_color.name()}; border: 1px solid #777;")
+            
+            self.dark_mode_checkbox.setChecked(False)
+            self.is_dark_mode = False
+    
+    def select_text_color(self):
+        """Open color picker for text color"""
+        color = QColorDialog.getColor(self.text_color, self, "Select Text Color")
+        if color.isValid():
+            self.text_color = color
+            self.text_color_preview.setStyleSheet(f"background-color: {self.text_color.name()}; border: 1px solid #777;")
+            
+            self.dark_mode_checkbox.setChecked(False)
+            self.is_dark_mode = False
+    
+    def apply_theme(self):
+        """Apply the current theme to the application"""
+        stylesheet = f"""
+            QMainWindow, QDialog, QWidget {{
+                background-color: {self.bg_color.name()};
+                color: {self.text_color.name()};
+            }}
+            QLabel, QCheckBox, QRadioButton, QGroupBox {{
+                color: {self.text_color.name()};
+            }}
+            QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox {{
+                background-color: {self.lighten_or_darken(self.bg_color, 15).name()};
+                color: {self.text_color.name()};
+                border: 1px solid {self.lighten_or_darken(self.bg_color, -30).name()};
+            }}
+            QComboBox, QTabBar::tab {{
+                background-color: {self.lighten_or_darken(self.bg_color, 10).name()};
+                color: {self.text_color.name()};
+            }}
+            
+            /* Sidebar specific styling */
+            QLabel#sidebar_logo {{
+                background-color: {self.lighten_or_darken(self.bg_color, 10).name()};
+                color: {self.text_color.name()};
+            }}
+            QToolButton {{
+                color: {self.text_color.name()};
+            }}
+            QToolButton:hover {{
+                background-color: {self.lighten_or_darken(self.bg_color, 20).name()};
+            }}
+            QToolButton:checked {{
+                background-color: #2196F3;
+                color: white;
+            }}
+        """
+        self.setStyleSheet(stylesheet)
+        
+        self.save_theme_settings()
+        
+        self.show_toast("Theme applied successfully", "success")
+    
+    def lighten_or_darken(self, color, amount):
+        """Lighten or darken a color by the given amount (-255 to 255)"""
+        new_color = QColor(color)
+        
+        if amount > 0:
+            new_color.setRed(min(255, new_color.red() + amount))
+            new_color.setGreen(min(255, new_color.green() + amount))
+            new_color.setBlue(min(255, new_color.blue() + amount))
+        else:
+            new_color.setRed(max(0, new_color.red() + amount))
+            new_color.setGreen(max(0, new_color.green() + amount))
+            new_color.setBlue(max(0, new_color.blue() + amount))
+        
+        return new_color
+
     def create_menu_bar(self):
         """Create application menu bar"""
         menu_bar = self.menuBar()
@@ -1607,7 +1803,7 @@ class MangaDownloaderApp(QMainWindow):
             self,
             "About MasterOfKay's Manga Downloader",
             """
-            <h3>MasterOfKay's Manga Downloader v1.3.1</h3>
+            <h3>MasterOfKay's Manga Downloader v Test-1.4</h3>
             <p>Download manga from popular sites with history tracking.</p>
             <p>Supported sites:</p>
             <ul>
