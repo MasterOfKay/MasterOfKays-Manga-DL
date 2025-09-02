@@ -11,7 +11,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QProgressBar, QScrollArea, QFrame, QMessageBox,
                             QTabWidget, QListWidget, QListWidgetItem, QDialog,
                             QCheckBox, QSpinBox, QGridLayout, QAction, QFileDialog,
-                            QSplitter, QToolButton, QMenu, QSizePolicy, QStackedWidget)
+                            QSplitter, QToolButton, QMenu, QSizePolicy, QStackedWidget,
+                            QGroupBox, QColorDialog)
 from PyQt5.QtCore import Qt, QObject, pyqtSignal, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QFont, QColor, QMouseEvent, QIcon, QPalette, QBrush, QPixmap
 
@@ -78,8 +79,13 @@ class MangaHistoryManager:
                             logging.info(f"Renamed invalid history file to {backup_file}")
                         except Exception as rename_err:
                             logging.error(f"Failed to rename invalid history file: {rename_err}")
+                        return {}
+            else:
+                logging.info("History file not found. Creating new history.")
+                return {}
         except Exception as e:
             logging.error(f"Error loading history: {e}")
+            return {}
     
     def _save_history(self):
         """Save history to file"""
@@ -381,13 +387,22 @@ class DownloadManager:
                 break
     
     def _get_manga_name(self, url, site_type):
-        if site_type == "asura":
-            return asura_get_manga_name(url)
-        elif site_type == "katana":
-            return katana_get_manga_name(url)
-        elif site_type == "webtoon":
-            return webtoon_get_manga_name(url)
-        return "Unknown Manga"
+        try:
+            if site_type == "asura":
+                return asura_get_manga_name(url)
+            elif site_type == "katana":
+                return katana_get_manga_name(url)
+            elif site_type == "webtoon":
+                return webtoon_get_manga_name(url)
+            return "Unknown Manga"
+        except (ConnectionError, TimeoutError, OSError) as conn_err:
+            # Network connection issues
+            site_name = self._get_site_name(site_type)
+            logging.error(f"Cannot connect to {site_name} to get manga name: {conn_err}")
+            return f"Unknown Manga ({site_name} unavailable)"
+        except Exception as e:
+            logging.error(f"Error getting manga name from {site_type}: {e}")
+            return f"Unknown Manga (Error: {str(e)[:50]})"
     
     def _get_chapters(self, url, site_type):
         if site_type == "asura":
@@ -532,36 +547,94 @@ class DownloadManager:
         """
         new_chapters = {}
         manga_list = self.history_manager.get_manga_list()
+        connection_errors = []
         
         if manga_name and manga_name in manga_list:
             manga_list = [manga_name]
+        
+        logging.info(f"Starting chapter scan for {len(manga_list)} manga")
             
-        for manga in manga_list:
-            manga_data = self.history_manager.get_manga_data(manga)
-            if not manga_data or not manga_data.get('url'):
-                continue
-                
-            site_type = manga_data.get('site_type', '')
-            url = manga_data.get('url', '')
-            
-            if not url or not site_type:
-                continue
-                
+        for idx, manga in enumerate(manga_list):
             try:
-                all_chapters = self._get_chapters(url, site_type)
-                downloaded_chapters = manga_data.get('chapters', {})
+                logging.info(f"Scanning manga {idx+1}/{len(manga_list)}: {manga}")
                 
-                missing_chapters = []
-                for ch_num, ch_name, ch_url in all_chapters:
-                    if ch_num not in downloaded_chapters:
-                        missing_chapters.append((ch_num, ch_name, ch_url))
+                manga_data = self.history_manager.get_manga_data(manga)
+                if not manga_data or not manga_data.get('url'):
+                    logging.warning(f"No data available for manga: {manga}")
+                    continue
+                    
+                site_type = manga_data.get('site_type', '')
+                url = manga_data.get('url', '')
                 
-                if missing_chapters:
-                    new_chapters[manga] = missing_chapters
-            except Exception as e:
-                logging.error(f"Error scanning chapters for {manga}: {e}")
+                if not url or not site_type:
+                    logging.warning(f"Missing URL or site_type for manga: {manga}")
+                    continue
+                    
+                try:
+                    logging.info(f"Fetching chapters for {manga} from {site_type}")
+                    all_chapters = self._get_chapters(url, site_type)
+                    
+                    if not all_chapters:
+                        logging.warning(f"No chapters found for manga: {manga}")
+                        continue
+                        
+                    downloaded_chapters = manga_data.get('chapters', {})
+                    logging.info(f"Found {len(all_chapters)} chapters, {len(downloaded_chapters)} already downloaded")
+                    
+                    missing_chapters = []
+                    for ch_num, ch_name, ch_url in all_chapters:
+                        if ch_num not in downloaded_chapters:
+                            missing_chapters.append((ch_num, ch_name, ch_url))
+                    
+                    if missing_chapters:
+                        new_chapters[manga] = missing_chapters
+                        logging.info(f"Found {len(missing_chapters)} new chapters for {manga}")
+                        
+                except (ConnectionError, TimeoutError, OSError) as conn_err:
+                    # Network connection issues
+                    site_name = self._get_site_name(site_type)
+                    error_msg = f"Cannot connect to {site_name} for manga '{manga}'"
+                    logging.error(f"{error_msg}: {conn_err}")
+                    connection_errors.append((manga, site_name))
+                    
+                except Exception as e:
+                    # Other errors (parsing, etc.)
+                    site_name = self._get_site_name(site_type)
+                    error_msg = f"Error scanning chapters for '{manga}' on {site_name}: {str(e)}"
+                    logging.error(error_msg)
+                    logging.error(traceback.format_exc())
+                    
+            except Exception as outer_e:
+                logging.error(f"Critical error processing manga '{manga}': {outer_e}")
+                logging.error(traceback.format_exc())
+                
+        logging.info(f"Chapter scan complete. Found new chapters for {len(new_chapters)} manga")
+                
+        # Show connection error toast if any sites couldn't be reached
+        if connection_errors:
+            unique_sites = set(site for _, site in connection_errors)
+            if len(unique_sites) == 1:
+                self.signals.show_toast.emit(
+                    f"Cannot connect to {list(unique_sites)[0]}. Check your internet connection.", 
+                    "error"
+                )
+            else:
+                sites_str = ", ".join(unique_sites)
+                self.signals.show_toast.emit(
+                    f"Cannot connect to: {sites_str}. Check your internet connection.", 
+                    "error"
+                )
                 
         return new_chapters
+    
+    def _get_site_name(self, site_type):
+        """Get human-readable site name from site type"""
+        site_names = {
+            'asura': 'AsuraComics',
+            'katana': 'MangaKatana',
+            'webtoon': 'Webtoons'
+        }
+        return site_names.get(site_type, site_type.title())
     
     def download_new_chapters(self, new_chapters_dict):
         """Add new chapters to the download queue"""
@@ -586,6 +659,7 @@ class DownloadManager:
 class Toast(QDialog):
     def __init__(self, parent=None):
         super(Toast, self).__init__(parent, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setObjectName("toastDialog")
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.close)
         
@@ -595,6 +669,7 @@ class Toast(QDialog):
         top_bar = QHBoxLayout()
         
         self.title_label = QLabel("")
+        self.title_label.setObjectName("title_label")
         self.title_label.setFont(QFont("Arial", 10, QFont.Bold))
         top_bar.addWidget(self.title_label)
         
@@ -635,67 +710,93 @@ class Toast(QDialog):
     def show_message(self, message, type="info", duration=3000):
         self.message_label.setText(message)
         
+        self.setStyleSheet("")
+        
+        palette = QPalette()
+        
         if type == "error":
             self.setStyleSheet("""
-                QDialog {
-                    background-color: white;
-                    border: 2px solid #E53935;
-                    border-radius: 10px;
+                QDialog#toastDialog {
+                    background-color: white !important;
+                    border: 2px solid #E53935 !important;
+                    border-radius: 10px !important;
+                    color: #E53935 !important;
                 }
-                QLabel#title_label {
-                    color: #E53935;
-                    font-weight: bold;
+                QDialog#toastDialog QLabel#title_label {
+                    color: #E53935 !important;
+                    font-weight: bold !important;
+                    background-color: transparent !important;
                 }
-                QLabel {
-                    color: #E53935;
+                QDialog#toastDialog QLabel {
+                    color: #E53935 !important;
+                    background-color: transparent !important;
                 }
-                QPushButton {
-                    color: #E53935;
+                QDialog#toastDialog QPushButton {
+                    color: #E53935 !important;
                 }
             """)
             self.title_label.setText("Error")
             self.close_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: rgba(229, 57, 53, 0.2);
-                    color: #E53935;
-                    border-radius: 15px;
-                    font-size: 16px;
-                    font-weight: bold;
+                QDialog#toastDialog QPushButton {
+                    background-color: rgba(229, 57, 53, 0.2) !important;
+                    color: #E53935 !important;
+                    border-radius: 15px !important;
+                    font-size: 16px !important;
+                    font-weight: bold !important;
                 }
-                QPushButton:hover {
-                    background-color: rgba(229, 57, 53, 0.4);
+                QDialog#toastDialog QPushButton:hover {
+                    background-color: rgba(229, 57, 53, 0.4) !important;
                 }
             """)
+            
+            palette.setColor(QPalette.Window, QColor("white"))
+            palette.setColor(QPalette.WindowText, QColor("#E53935"))
+            self.setPalette(palette)
+            
             duration = 30000
         elif type == "success":
             self.setStyleSheet("""
-                QDialog {
-                    background-color: #43A047;
-                    border-radius: 10px;
+                QDialog#toastDialog {
+                    background-color: #43A047 !important;
+                    border-radius: 10px !important;
                 }
-                QLabel {
-                    color: white;
+                QDialog#toastDialog QLabel {
+                    color: white !important;
+                    background-color: transparent !important;
                 }
-                QPushButton {
-                    color: white;
+                QDialog#toastDialog QPushButton {
+                    color: white !important;
+                    background-color: rgba(255, 255, 255, 0.2) !important;
                 }
             """)
             self.title_label.setText("Success")
+            
+            palette.setColor(QPalette.Window, QColor("#43A047"))
+            palette.setColor(QPalette.WindowText, QColor("white"))
+            self.setPalette(palette)
         else:
             self.setStyleSheet("""
-                QDialog {
-                    background-color: #2196F3;
-                    border-radius: 10px;
+                QDialog#toastDialog {
+                    background-color: #2196F3 !important;
+                    border-radius: 10px !important;
                 }
-                QLabel {
-                    color: white;
+                QDialog#toastDialog QLabel {
+                    color: white !important;
+                    background-color: transparent !important;
                 }
-                QPushButton {
-                    color: white;
+                QDialog#toastDialog QPushButton {
+                    color: white !important;
+                    background-color: rgba(255, 255, 255, 0.2) !important;
                 }
             """)
             self.title_label.setText("Information")
             
+            palette.setColor(QPalette.Window, QColor("#2196F3"))
+            palette.setColor(QPalette.WindowText, QColor("white"))
+            self.setPalette(palette)
+        
+        self.setPalette(palette)
+        
         if self.parent():
             parent_rect = self.parent().geometry()
             width = min(400, parent_rect.width() - 40)
@@ -707,6 +808,10 @@ class Toast(QDialog):
                                               parent_rect.height() - height - 20))
             
             self.setGeometry(x, y, width, height)
+        
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
         
         self.show()
         self.timer.start(duration)
@@ -735,7 +840,6 @@ class SidebarButton(QToolButton):
                 border-radius: 0px;
                 text-align: left;
                 padding: 10px;
-                color: #333;
                 font-weight: bold;
             }
             QToolButton:hover {
@@ -768,13 +872,13 @@ class Sidebar(QWidget):
         self.history_btn.clicked.connect(lambda: self.itemClicked.emit("history"))
         
         logo_label = QLabel("MasterOfKay's\nMangaDL")
+        logo_label.setObjectName("sidebar_logo")
         logo_label.setStyleSheet("""
-            QLabel {
+            QLabel#sidebar_logo {
                 color: #2196F3;
                 font-size: 18px;
                 font-weight: bold;
                 padding: 15px;
-                background-color: #f5f5f5;
             }
         """)
         
@@ -1299,6 +1403,11 @@ class MangaDownloaderApp(QMainWindow):
         self.download_path = os.path.abspath(os.getcwd())
         self.load_download_path()
         
+        self.bg_color = QColor(240, 240, 240)
+        self.text_color = QColor(51, 51, 51)
+        self.is_dark_mode = False
+        self.load_theme_settings()
+        
         self.signals = DownloadSignals()
         self.download_manager = DownloadManager(self.signals)
         self.history_manager = self.download_manager.history_manager
@@ -1344,6 +1453,24 @@ class MangaDownloaderApp(QMainWindow):
             except Exception as e:
                 print(f"Error loading config: {e}")
     
+    def load_theme_settings(self):
+        """Load theme settings from config if available"""
+        config_path = os.path.join(os.path.expanduser("~"), ".mangadownloader", "config.txt")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    for line in f:
+                        if line.startswith("dark_mode="):
+                            self.is_dark_mode = line.strip().split("=", 1)[1].lower() == "true"
+                        elif line.startswith("bg_color="):
+                            color_str = line.strip().split("=", 1)[1]
+                            self.bg_color = QColor(color_str)
+                        elif line.startswith("text_color="):
+                            color_str = line.strip().split("=", 1)[1]
+                            self.text_color = QColor(color_str)
+            except Exception as e:
+                print(f"Error loading theme settings: {e}")
+    
     def save_download_path(self):
         """Save download path to a config file"""
         config_dir = os.path.join(os.path.expanduser("~"), ".mangadownloader")
@@ -1351,8 +1478,11 @@ class MangaDownloaderApp(QMainWindow):
         
         config_path = os.path.join(config_dir, "config.txt")
         with open(config_path, "w") as f:
-            f.write(f"download_path={self.download_path}")
-    
+            f.write(f"download_path={self.download_path}\n")
+            f.write(f"dark_mode={self.is_dark_mode}\n")
+            f.write(f"bg_color={self.bg_color.name()}\n")
+            f.write(f"text_color={self.text_color.name()}\n")
+            
     def on_path_changed(self, path):
         """Handle when user types or pastes a path"""
         if os.path.isdir(path):
@@ -1368,12 +1498,31 @@ class MangaDownloaderApp(QMainWindow):
             self.download_path,
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
         )
+    
+    def save_theme_settings(self):
+        """Save theme settings to config file"""
+        config_dir = os.path.join(os.path.expanduser("~"), ".mangadownloader")
+        os.makedirs(config_dir, exist_ok=True)
         
-        if path:
-            self.download_path = path
-            self.path_input.setText(path)
-            self.save_download_path()
-            self.download_manager.download_path = self.download_path
+        config_path = os.path.join(config_dir, "config.txt")
+        existing_config = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r") as f:
+                    for line in f:
+                        if "=" in line:
+                            key, value = line.strip().split("=", 1)
+                            existing_config[key] = value
+            except Exception as e:
+                print(f"Error reading existing config: {e}")
+        
+        existing_config["dark_mode"] = str(self.is_dark_mode)
+        existing_config["bg_color"] = self.bg_color.name()
+        existing_config["text_color"] = self.text_color.name()
+        
+        with open(config_path, "w") as f:
+            for key, value in existing_config.items():
+                f.write(f"{key}={value}\n")
     
     def init_ui(self):
         central_widget = QWidget()
@@ -1506,6 +1655,60 @@ class MangaDownloaderApp(QMainWindow):
         settings_header.setFont(QFont("Arial", 16, QFont.Bold))
         settings_layout.addWidget(settings_header)
         
+        theme_group = QGroupBox("Appearance")
+        theme_layout = QVBoxLayout()
+        
+        dark_mode_layout = QHBoxLayout()
+        self.dark_mode_checkbox = QCheckBox("Dark Mode")
+        self.dark_mode_checkbox.setChecked(self.is_dark_mode)
+        self.dark_mode_checkbox.stateChanged.connect(self.toggle_dark_mode)
+        dark_mode_layout.addWidget(self.dark_mode_checkbox)
+        dark_mode_layout.addStretch()
+        theme_layout.addLayout(dark_mode_layout)
+        
+        bg_color_layout = QHBoxLayout()
+        bg_color_label = QLabel("Background Color:")
+        self.bg_color_preview = QPushButton()
+        self.bg_color_preview.setFixedSize(30, 30)
+        self.bg_color_preview.setCursor(Qt.PointingHandCursor)
+        self.bg_color_preview.clicked.connect(self.select_background_color)
+        self.bg_color_preview.setStyleSheet(f"background-color: {self.bg_color.name()}; border: 1px solid #777;")
+        bg_color_layout.addWidget(bg_color_label)
+        bg_color_layout.addStretch()
+        bg_color_layout.addWidget(self.bg_color_preview)
+        theme_layout.addLayout(bg_color_layout)
+        
+        text_color_layout = QHBoxLayout()
+        text_color_label = QLabel("Text Color:")
+        self.text_color_preview = QPushButton()
+        self.text_color_preview.setFixedSize(30, 30)
+        self.text_color_preview.setCursor(Qt.PointingHandCursor)
+        self.text_color_preview.clicked.connect(self.select_text_color)
+        self.text_color_preview.setStyleSheet(f"background-color: {self.text_color.name()}; border: 1px solid #777;")
+        text_color_layout.addWidget(text_color_label)
+        text_color_layout.addStretch()
+        text_color_layout.addWidget(self.text_color_preview)
+        theme_layout.addLayout(text_color_layout)
+        
+        apply_theme_btn = QPushButton("Apply Theme")
+        apply_theme_btn.clicked.connect(self.apply_theme)
+        apply_theme_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0b7dda;
+            }
+        """)
+        theme_layout.addWidget(apply_theme_btn)
+        
+        theme_group.setLayout(theme_layout)
+        settings_layout.addWidget(theme_group)
+        
         settings_layout.addStretch()
         
         self.content_stack.addWidget(downloads_page)
@@ -1573,7 +1776,100 @@ class MangaDownloaderApp(QMainWindow):
         self.create_menu_bar()
         
         self.populate_history_list()
+        
+        if self.is_dark_mode or (self.bg_color != QColor(240, 240, 240) or self.text_color != QColor(51, 51, 51)):
+            QTimer.singleShot(100, self.apply_theme)
     
+    def toggle_dark_mode(self, state):
+        """Toggle between dark and light mode"""
+        self.is_dark_mode = (state == Qt.Checked)
+        if self.is_dark_mode:
+            self.bg_color = QColor(40, 40, 40)
+            self.text_color = QColor(230, 230, 230)
+        else:
+            self.bg_color = QColor(240, 240, 240)
+            self.text_color = QColor(51, 51, 51)
+        
+        self.bg_color_preview.setStyleSheet(f"background-color: {self.bg_color.name()}; border: 1px solid #777;")
+        self.text_color_preview.setStyleSheet(f"background-color: {self.text_color.name()}; border: 1px solid #777;")
+    
+    def select_background_color(self):
+        """Open color picker for background color"""
+        color = QColorDialog.getColor(self.bg_color, self, "Select Background Color")
+        if color.isValid():
+            self.bg_color = color
+            self.bg_color_preview.setStyleSheet(f"background-color: {self.bg_color.name()}; border: 1px solid #777;")
+            
+            self.dark_mode_checkbox.setChecked(False)
+            self.is_dark_mode = False
+    
+    def select_text_color(self):
+        """Open color picker for text color"""
+        color = QColorDialog.getColor(self.text_color, self, "Select Text Color")
+        if color.isValid():
+            self.text_color = color
+            self.text_color_preview.setStyleSheet(f"background-color: {self.text_color.name()}; border: 1px solid #777;")
+            
+            self.dark_mode_checkbox.setChecked(False)
+            self.is_dark_mode = False
+    
+    def apply_theme(self):
+        """Apply the current theme to the application"""
+        stylesheet = f"""
+            QMainWindow, QDialog, QWidget {{
+                background-color: {self.bg_color.name()};
+                color: {self.text_color.name()};
+            }}
+            QLabel, QCheckBox, QRadioButton, QGroupBox {{
+                color: {self.text_color.name()};
+            }}
+            QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox {{
+                background-color: {self.lighten_or_darken(self.bg_color, 15).name()};
+                color: {self.text_color.name()};
+                border: 1px solid {self.lighten_or_darken(self.bg_color, -30).name()};
+            }}
+            QComboBox, QTabBar::tab {{
+                background-color: {self.lighten_or_darken(self.bg_color, 10).name()};
+                color: {self.text_color.name()};
+            }}
+            
+            /* Sidebar specific styling */
+            QLabel#sidebar_logo {{
+                background-color: {self.lighten_or_darken(self.bg_color, 10).name()};
+                color: {self.text_color.name()};
+            }}
+            QToolButton {{
+                color: {self.text_color.name()};
+            }}
+            QToolButton:hover {{
+                background-color: {self.lighten_or_darken(self.bg_color, 20).name()};
+            }}
+            QToolButton:checked {{
+                background-color: #2196F3;
+                color: white;
+            }}
+        """
+        self.setStyleSheet(stylesheet)
+        
+        self.save_theme_settings()
+        
+        self.show_toast("Theme applied successfully", "success")
+    
+    def lighten_or_darken(self, color, amount):
+        """Lighten or darken a color by the given amount (-255 to 255)"""
+        new_color = QColor(color)
+        
+        if amount > 0:
+            new_color.setRed(min(255, new_color.red() + amount))
+            new_color.setGreen(min(255, new_color.green() + amount))
+            new_color.setBlue(min(255, new_color.blue() + amount))
+        else:
+            new_color.setRed(max(0, new_color.red() + amount))
+            new_color.setGreen(max(0, new_color.green() + amount))
+            new_color.setBlue(max(0, new_color.blue() + amount))
+        
+        return new_color
+
     def create_menu_bar(self):
         """Create application menu bar"""
         menu_bar = self.menuBar()
@@ -1607,7 +1903,7 @@ class MangaDownloaderApp(QMainWindow):
             self,
             "About MasterOfKay's Manga Downloader",
             """
-            <h3>MasterOfKay's Manga Downloader v1.3.1</h3>
+            <h3>MasterOfKay's Manga Downloader v Test-1.4.1</h3>
             <p>Download manga from popular sites with history tracking.</p>
             <p>Supported sites:</p>
             <ul>
@@ -1722,28 +2018,45 @@ class MangaDownloaderApp(QMainWindow):
         self.signals.show_toast.emit("Scanning for new chapters...", "info")
         
         def scan_task():
-            new_chapters = self.download_manager.scan_for_new_chapters()
-            
-            self.new_chapters_cache = new_chapters
-            
-            total_new = sum(len(chapters) for chapters in new_chapters.values())
-            manga_count = len(new_chapters)
-            
-            if total_new > 0:
-                self.signals.show_toast.emit(
-                    f"Found {total_new} new chapters for {manga_count} manga!", 
-                    "success"
-                )
+            try:
+                new_chapters = self.download_manager.scan_for_new_chapters()
                 
-                for i in range(self.history_layout.count()):
-                    item = self.history_layout.itemAt(i).widget()
-                    if isinstance(item, HistoryListItemWidget):
-                        if item.manga_name in new_chapters:
-                            item.set_has_new(True)
-            else:
-                self.signals.show_toast.emit("No new chapters found", "info")
+                # Store the results but don't access UI elements from this thread
+                self.new_chapters_cache = new_chapters
+                
+                total_new = sum(len(chapters) for chapters in new_chapters.values())
+                manga_count = len(new_chapters)
+                
+                if total_new > 0:
+                    self.signals.show_toast.emit(
+                        f"Found {total_new} new chapters for {manga_count} manga!", 
+                        "success"
+                    )
+                    
+                    # Signal that we need to update the UI - do this on main thread
+                    QTimer.singleShot(100, lambda: self.update_history_with_new_chapters(new_chapters))
+                else:
+                    self.signals.show_toast.emit("No new chapters found", "info")
+            except Exception as e:
+                logging.error(f"Error in scan_all_manga thread: {e}")
+                logging.error(traceback.format_exc())
+                self.signals.show_toast.emit(f"Error scanning manga: {str(e)}", "error")
         
         threading.Thread(target=scan_task, daemon=True).start()
+    
+    def update_history_with_new_chapters(self, new_chapters):
+        """Update history UI with new chapters info - runs on main thread"""
+        try:
+            for i in range(self.history_layout.count()):
+                item = self.history_layout.itemAt(i)
+                if item and item.widget():
+                    widget = item.widget()
+                    if isinstance(widget, HistoryListItemWidget):
+                        if widget.manga_name in new_chapters:
+                            widget.set_has_new(True)
+        except Exception as e:
+            logging.error(f"Error updating history UI: {e}")
+            logging.error(traceback.format_exc())
     
     def scan_all_external_chapters(self):
         """Scan all manga directories for externally downloaded chapters"""
@@ -1973,8 +2286,15 @@ class MangaDownloaderApp(QMainWindow):
                     
                     if not self.chapters:
                         self.error = "No chapters found"
+                        
+                except (ConnectionError, TimeoutError, OSError) as conn_err:
+                    # Network connection issues
+                    site_name = self.parent.download_manager._get_site_name(site_type) if 'site_type' in locals() else "website"
+                    self.error = f"Cannot connect to {site_name}. Check your internet connection."
+                    logging.error(f"Connection error loading chapters for {self.manga_name}: {conn_err}")
+                    
                 except Exception as e:
-                    self.error = str(e)
+                    self.error = f"Error loading chapters: {str(e)}"
                     logging.error(f"Error loading chapters: {e}")
         
         loader = ChapterLoaderThread(self, manga_name)
@@ -2147,8 +2467,16 @@ class MangaDownloaderApp(QMainWindow):
                 self.content_stack.setCurrentIndex(0)
             else:
                 self.signals.show_toast.emit(f"Could not find Chapter {chapter_num}", "error")
+                
+        except (ConnectionError, TimeoutError, OSError) as conn_err:
+            # Network connection issues
+            site_name = self.download_manager._get_site_name(site_type)
+            self.signals.show_toast.emit(f"Cannot connect to {site_name}. Check your internet connection.", "error")
+            logging.error(f"Connection error during retry for {manga_name} Chapter {chapter_num}: {conn_err}")
+            
         except Exception as e:
             self.signals.show_toast.emit(f"Error: {str(e)}", "error")
+            logging.error(f"Error during retry for {manga_name} Chapter {chapter_num}: {e}")
     
     def start_download(self):
         """Start a new manga download - thread-safe"""
@@ -2188,6 +2516,18 @@ class MangaDownloaderApp(QMainWindow):
                         
                     if not self.chapters:
                         self.error = f"No chapters found for {self.manga_name}"
+                        
+                except (ConnectionError, TimeoutError, OSError) as conn_err:
+                    # Network connection issues
+                    site_names = {
+                        'asura': 'AsuraComics',
+                        'katana': 'MangaKatana',
+                        'webtoon': 'Webtoons'
+                    }
+                    site_name = site_names.get(self.site_type, self.site_type.title())
+                    self.error = f"Cannot connect to {site_name}. Check your internet connection."
+                    logging.error(f"Connection error fetching manga from {site_name}: {conn_err}")
+                    
                 except Exception as e:
                     self.error = str(e)
                     logging.error(f"Error fetching manga: {e}")
