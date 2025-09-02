@@ -79,8 +79,13 @@ class MangaHistoryManager:
                             logging.info(f"Renamed invalid history file to {backup_file}")
                         except Exception as rename_err:
                             logging.error(f"Failed to rename invalid history file: {rename_err}")
+                        return {}
+            else:
+                logging.info("History file not found. Creating new history.")
+                return {}
         except Exception as e:
             logging.error(f"Error loading history: {e}")
+            return {}
     
     def _save_history(self):
         """Save history to file"""
@@ -382,13 +387,22 @@ class DownloadManager:
                 break
     
     def _get_manga_name(self, url, site_type):
-        if site_type == "asura":
-            return asura_get_manga_name(url)
-        elif site_type == "katana":
-            return katana_get_manga_name(url)
-        elif site_type == "webtoon":
-            return webtoon_get_manga_name(url)
-        return "Unknown Manga"
+        try:
+            if site_type == "asura":
+                return asura_get_manga_name(url)
+            elif site_type == "katana":
+                return katana_get_manga_name(url)
+            elif site_type == "webtoon":
+                return webtoon_get_manga_name(url)
+            return "Unknown Manga"
+        except (ConnectionError, TimeoutError, OSError) as conn_err:
+            # Network connection issues
+            site_name = self._get_site_name(site_type)
+            logging.error(f"Cannot connect to {site_name} to get manga name: {conn_err}")
+            return f"Unknown Manga ({site_name} unavailable)"
+        except Exception as e:
+            logging.error(f"Error getting manga name from {site_type}: {e}")
+            return f"Unknown Manga (Error: {str(e)[:50]})"
     
     def _get_chapters(self, url, site_type):
         if site_type == "asura":
@@ -533,36 +547,94 @@ class DownloadManager:
         """
         new_chapters = {}
         manga_list = self.history_manager.get_manga_list()
+        connection_errors = []
         
         if manga_name and manga_name in manga_list:
             manga_list = [manga_name]
+        
+        logging.info(f"Starting chapter scan for {len(manga_list)} manga")
             
-        for manga in manga_list:
-            manga_data = self.history_manager.get_manga_data(manga)
-            if not manga_data or not manga_data.get('url'):
-                continue
-                
-            site_type = manga_data.get('site_type', '')
-            url = manga_data.get('url', '')
-            
-            if not url or not site_type:
-                continue
-                
+        for idx, manga in enumerate(manga_list):
             try:
-                all_chapters = self._get_chapters(url, site_type)
-                downloaded_chapters = manga_data.get('chapters', {})
+                logging.info(f"Scanning manga {idx+1}/{len(manga_list)}: {manga}")
                 
-                missing_chapters = []
-                for ch_num, ch_name, ch_url in all_chapters:
-                    if ch_num not in downloaded_chapters:
-                        missing_chapters.append((ch_num, ch_name, ch_url))
+                manga_data = self.history_manager.get_manga_data(manga)
+                if not manga_data or not manga_data.get('url'):
+                    logging.warning(f"No data available for manga: {manga}")
+                    continue
+                    
+                site_type = manga_data.get('site_type', '')
+                url = manga_data.get('url', '')
                 
-                if missing_chapters:
-                    new_chapters[manga] = missing_chapters
-            except Exception as e:
-                logging.error(f"Error scanning chapters for {manga}: {e}")
+                if not url or not site_type:
+                    logging.warning(f"Missing URL or site_type for manga: {manga}")
+                    continue
+                    
+                try:
+                    logging.info(f"Fetching chapters for {manga} from {site_type}")
+                    all_chapters = self._get_chapters(url, site_type)
+                    
+                    if not all_chapters:
+                        logging.warning(f"No chapters found for manga: {manga}")
+                        continue
+                        
+                    downloaded_chapters = manga_data.get('chapters', {})
+                    logging.info(f"Found {len(all_chapters)} chapters, {len(downloaded_chapters)} already downloaded")
+                    
+                    missing_chapters = []
+                    for ch_num, ch_name, ch_url in all_chapters:
+                        if ch_num not in downloaded_chapters:
+                            missing_chapters.append((ch_num, ch_name, ch_url))
+                    
+                    if missing_chapters:
+                        new_chapters[manga] = missing_chapters
+                        logging.info(f"Found {len(missing_chapters)} new chapters for {manga}")
+                        
+                except (ConnectionError, TimeoutError, OSError) as conn_err:
+                    # Network connection issues
+                    site_name = self._get_site_name(site_type)
+                    error_msg = f"Cannot connect to {site_name} for manga '{manga}'"
+                    logging.error(f"{error_msg}: {conn_err}")
+                    connection_errors.append((manga, site_name))
+                    
+                except Exception as e:
+                    # Other errors (parsing, etc.)
+                    site_name = self._get_site_name(site_type)
+                    error_msg = f"Error scanning chapters for '{manga}' on {site_name}: {str(e)}"
+                    logging.error(error_msg)
+                    logging.error(traceback.format_exc())
+                    
+            except Exception as outer_e:
+                logging.error(f"Critical error processing manga '{manga}': {outer_e}")
+                logging.error(traceback.format_exc())
+                
+        logging.info(f"Chapter scan complete. Found new chapters for {len(new_chapters)} manga")
+                
+        # Show connection error toast if any sites couldn't be reached
+        if connection_errors:
+            unique_sites = set(site for _, site in connection_errors)
+            if len(unique_sites) == 1:
+                self.signals.show_toast.emit(
+                    f"Cannot connect to {list(unique_sites)[0]}. Check your internet connection.", 
+                    "error"
+                )
+            else:
+                sites_str = ", ".join(unique_sites)
+                self.signals.show_toast.emit(
+                    f"Cannot connect to: {sites_str}. Check your internet connection.", 
+                    "error"
+                )
                 
         return new_chapters
+    
+    def _get_site_name(self, site_type):
+        """Get human-readable site name from site type"""
+        site_names = {
+            'asura': 'AsuraComics',
+            'katana': 'MangaKatana',
+            'webtoon': 'Webtoons'
+        }
+        return site_names.get(site_type, site_type.title())
     
     def download_new_chapters(self, new_chapters_dict):
         """Add new chapters to the download queue"""
@@ -1946,28 +2018,45 @@ class MangaDownloaderApp(QMainWindow):
         self.signals.show_toast.emit("Scanning for new chapters...", "info")
         
         def scan_task():
-            new_chapters = self.download_manager.scan_for_new_chapters()
-            
-            self.new_chapters_cache = new_chapters
-            
-            total_new = sum(len(chapters) for chapters in new_chapters.values())
-            manga_count = len(new_chapters)
-            
-            if total_new > 0:
-                self.signals.show_toast.emit(
-                    f"Found {total_new} new chapters for {manga_count} manga!", 
-                    "success"
-                )
+            try:
+                new_chapters = self.download_manager.scan_for_new_chapters()
                 
-                for i in range(self.history_layout.count()):
-                    item = self.history_layout.itemAt(i).widget()
-                    if isinstance(item, HistoryListItemWidget):
-                        if item.manga_name in new_chapters:
-                            item.set_has_new(True)
-            else:
-                self.signals.show_toast.emit("No new chapters found", "info")
+                # Store the results but don't access UI elements from this thread
+                self.new_chapters_cache = new_chapters
+                
+                total_new = sum(len(chapters) for chapters in new_chapters.values())
+                manga_count = len(new_chapters)
+                
+                if total_new > 0:
+                    self.signals.show_toast.emit(
+                        f"Found {total_new} new chapters for {manga_count} manga!", 
+                        "success"
+                    )
+                    
+                    # Signal that we need to update the UI - do this on main thread
+                    QTimer.singleShot(100, lambda: self.update_history_with_new_chapters(new_chapters))
+                else:
+                    self.signals.show_toast.emit("No new chapters found", "info")
+            except Exception as e:
+                logging.error(f"Error in scan_all_manga thread: {e}")
+                logging.error(traceback.format_exc())
+                self.signals.show_toast.emit(f"Error scanning manga: {str(e)}", "error")
         
         threading.Thread(target=scan_task, daemon=True).start()
+    
+    def update_history_with_new_chapters(self, new_chapters):
+        """Update history UI with new chapters info - runs on main thread"""
+        try:
+            for i in range(self.history_layout.count()):
+                item = self.history_layout.itemAt(i)
+                if item and item.widget():
+                    widget = item.widget()
+                    if isinstance(widget, HistoryListItemWidget):
+                        if widget.manga_name in new_chapters:
+                            widget.set_has_new(True)
+        except Exception as e:
+            logging.error(f"Error updating history UI: {e}")
+            logging.error(traceback.format_exc())
     
     def scan_all_external_chapters(self):
         """Scan all manga directories for externally downloaded chapters"""
@@ -2197,8 +2286,15 @@ class MangaDownloaderApp(QMainWindow):
                     
                     if not self.chapters:
                         self.error = "No chapters found"
+                        
+                except (ConnectionError, TimeoutError, OSError) as conn_err:
+                    # Network connection issues
+                    site_name = self.parent.download_manager._get_site_name(site_type) if 'site_type' in locals() else "website"
+                    self.error = f"Cannot connect to {site_name}. Check your internet connection."
+                    logging.error(f"Connection error loading chapters for {self.manga_name}: {conn_err}")
+                    
                 except Exception as e:
-                    self.error = str(e)
+                    self.error = f"Error loading chapters: {str(e)}"
                     logging.error(f"Error loading chapters: {e}")
         
         loader = ChapterLoaderThread(self, manga_name)
@@ -2371,8 +2467,16 @@ class MangaDownloaderApp(QMainWindow):
                 self.content_stack.setCurrentIndex(0)
             else:
                 self.signals.show_toast.emit(f"Could not find Chapter {chapter_num}", "error")
+                
+        except (ConnectionError, TimeoutError, OSError) as conn_err:
+            # Network connection issues
+            site_name = self.download_manager._get_site_name(site_type)
+            self.signals.show_toast.emit(f"Cannot connect to {site_name}. Check your internet connection.", "error")
+            logging.error(f"Connection error during retry for {manga_name} Chapter {chapter_num}: {conn_err}")
+            
         except Exception as e:
             self.signals.show_toast.emit(f"Error: {str(e)}", "error")
+            logging.error(f"Error during retry for {manga_name} Chapter {chapter_num}: {e}")
     
     def start_download(self):
         """Start a new manga download - thread-safe"""
@@ -2412,6 +2516,18 @@ class MangaDownloaderApp(QMainWindow):
                         
                     if not self.chapters:
                         self.error = f"No chapters found for {self.manga_name}"
+                        
+                except (ConnectionError, TimeoutError, OSError) as conn_err:
+                    # Network connection issues
+                    site_names = {
+                        'asura': 'AsuraComics',
+                        'katana': 'MangaKatana',
+                        'webtoon': 'Webtoons'
+                    }
+                    site_name = site_names.get(self.site_type, self.site_type.title())
+                    self.error = f"Cannot connect to {site_name}. Check your internet connection."
+                    logging.error(f"Connection error fetching manga from {site_name}: {conn_err}")
+                    
                 except Exception as e:
                     self.error = str(e)
                     logging.error(f"Error fetching manga: {e}")
