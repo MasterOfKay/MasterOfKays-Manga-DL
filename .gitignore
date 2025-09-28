@@ -9,7 +9,7 @@ build_exe.py
 *.cbz
 
 # Python cache files
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -45,13 +45,13 @@ env/
 *.swo
 
 # Manga download directories
-# Ignore all directories except those that are clearly part of the project
-*/
-!*/.*
-!*/__pycache__
+# Ignore specific manga download directories but allow src and its subdirectories
+[A-Z]*/
+!src/
+!src/**/
 !.github/
 !tests/
-
-# Keep specific project directories (add more as needed)
 !docs/
 !examples/
+!*/.*
+!*/__pycache__
