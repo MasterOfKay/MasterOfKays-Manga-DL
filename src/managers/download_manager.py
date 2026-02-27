@@ -13,15 +13,15 @@ from concurrent.futures import ThreadPoolExecutor
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
 
 try:
-    from ..sites import AsuraComicsDownloader, MangaKatanaDownloader, WebtoonDownloader
-    from ..sites.base import MangaMetadata as SiteMetadata
+    from ..sites import AsuraComicsDownloader, MangaKatanaDownloader, WebtoonDownloader, MangaDexDownloader
+    from ..sites.base import MangaMetadata as SiteMetadata, ChapterInfo
     from ..managers.database_manager import DatabaseManager, MangaMetadata as DBMetadata, ChapterData
 except ImportError:
     import sys
     import os
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-    from sites import AsuraComicsDownloader, MangaKatanaDownloader, WebtoonDownloader
-    from sites.base import MangaMetadata as SiteMetadata
+    from sites import AsuraComicsDownloader, MangaKatanaDownloader, WebtoonDownloader, MangaDexDownloader
+    from sites.base import MangaMetadata as SiteMetadata, ChapterInfo
     from managers.database_manager import DatabaseManager, MangaMetadata as DBMetadata, ChapterData
 
 
@@ -46,8 +46,9 @@ class DownloadSignals(QObject):
 class DownloadManager:
     """Manages manga downloads and queue with database integration."""
     
-    def __init__(self, signals: DownloadSignals):
+    def __init__(self, signals: DownloadSignals, settings_manager=None):
         self.signals = signals
+        self.settings_manager = settings_manager
         self.download_queue = []
         self.is_downloading = False
         self.cancelled_downloads = set()
@@ -63,7 +64,6 @@ class DownloadManager:
             logging.error(f"Failed to create default download path: {e}")
             self.download_path = None
         
-        # Initialize db
         self.db_manager = DatabaseManager()
         
         self.cover_images_dir = os.path.join(os.path.expanduser("~"), ".mangadownloader", "covers")
@@ -73,7 +73,8 @@ class DownloadManager:
             'asura': AsuraComicsDownloader(),
             'katana': MangaKatanaDownloader(),
             'mangakatana': MangaKatanaDownloader(),
-            'webtoon': WebtoonDownloader()
+            'webtoon': WebtoonDownloader(),
+            'mangadex': MangaDexDownloader()
         }
     
     def validate_manga_url(self, url: str) -> Tuple[bool, str]:
@@ -83,7 +84,7 @@ class DownloadManager:
                 return True, site_type
         return False, ""
     
-    def add_to_queue(self, url: str, chapters: Optional[List[str]] = None) -> bool:
+    def add_to_queue(self, url: str, chapters: Optional[List[str]] = None, metadata=None, language: str = 'en') -> bool:
         """Add a manga to the download queue."""
         try:
             is_valid, site_type = self.validate_manga_url(url)
@@ -99,7 +100,9 @@ class DownloadManager:
                 return False
             
             manga_id = None
-            manga_data = self.db_manager.get_manga_by_title(manga_name)
+            manga_data = self.db_manager.get_manga_by_url(url)
+            if not manga_data:
+                manga_data = self.db_manager.get_manga_by_title(manga_name)
             if not manga_data:
                 all_manga = self.db_manager.get_manga_list()
                 for manga in all_manga:
@@ -110,10 +113,18 @@ class DownloadManager:
             if manga_data:
                 manga_id = manga_data['id']
                 manga_name = manga_data['title']
+                if site_type in ('asura', 'asuracomics'):
+                    cleaned = re.sub(
+                        r'[\s\-–—|]+asura\s*(scans?|comics?|toon|scan)?\s*$',
+                        '', manga_name, flags=re.IGNORECASE
+                    ).strip()
+                    if cleaned and cleaned != manga_name:
+                        manga_name = cleaned
+                        logging.info(f"Stripped site suffix from title: '{manga_data['title']}' → '{manga_name}'")
                 
                 if chapters and manga_id:
                     for chapter_identifier in chapters:
-                        db_chapters = self.db_manager.get_chapters_for_manga(manga_id)
+                        db_chapters = self.db_manager.get_chapters_for_manga(manga_id, language=language if site_type == 'mangadex' else None)
                         for db_chapter in db_chapters:
                             if (db_chapter['chapter_name'] == chapter_identifier or 
                                 db_chapter['chapter_number'] == chapter_identifier):
@@ -127,7 +138,8 @@ class DownloadManager:
                 'site_type': site_type,
                 'chapters': chapters,
                 'status': 'queued',
-                'manga_id': manga_id
+                'manga_id': manga_id,
+                'language': language  # Store language for correct chapter URL lookup
             }
             
             self.download_queue.append(queue_item)
@@ -228,6 +240,11 @@ class DownloadManager:
             
             site_metadata = downloader.get_manga_metadata(manga_url)
             title = site_metadata.title or downloader.get_manga_name(manga_url)
+            if site_type in ('asura', 'asuracomics'):
+                title = re.sub(
+                    r'[\s\-–—|]+asura\s*(scans?|comics?|toon|scan)?\s*$',
+                    '', title, flags=re.IGNORECASE
+                ).strip()
             
             cover_image_path = ""
             if site_metadata.cover_image_url:
@@ -252,16 +269,68 @@ class DownloadManager:
             
             manga_id = self.db_manager.add_or_update_manga(db_metadata, cover_image_path)
             
-            chapters = downloader.get_chapter_links(manga_url)
-            for chapter_num, chapter_name, chapter_url in chapters:
-                chapter_data = ChapterData(
-                    chapter_number=chapter_num,
-                    chapter_name=chapter_name,
-                    chapter_url=chapter_url,
-                    language=getattr(site_metadata, 'language', 'en'),
-                    is_downloaded=False
-                )
-                self.db_manager.add_or_update_chapter(manga_id, chapter_data)
+            if site_type == 'mangadex' and hasattr(downloader, 'get_available_languages'):
+                try:
+                    logging.info(f"Fetching chapters for all languages for {title}")
+                    languages = downloader.get_available_languages(manga_url)
+                    total_chapters_stored = 0
+                    
+                    for lang_code, lang_name in languages:
+                        lang_chapters = downloader.get_chapters_by_language(manga_url, lang_code)
+                        logging.info(f"Found {len(lang_chapters)} chapters in {lang_name} ({lang_code})")
+                        
+                        for chapter in lang_chapters:
+                            if ChapterInfo and isinstance(chapter, ChapterInfo):
+                                chapter_data = ChapterData(
+                                    chapter_number=chapter.chapter_number,
+                                    chapter_name=chapter.title or f"Chapter {chapter.chapter_number}",
+                                    chapter_url=chapter.chapter_url or chapter.chapter_id,
+                                    language=lang_code,
+                                    volume_number=chapter.volume_number or "",
+                                    is_downloaded=False
+                                )
+                                self.db_manager.add_or_update_chapter(manga_id, chapter_data)
+                                total_chapters_stored += 1
+                    
+                    logging.info(f"Stored {total_chapters_stored} chapters across {len(languages)} languages for {title}")
+                except Exception as e:
+                    logging.error(f"Error fetching MangaDex chapters for all languages: {e}")
+                    chapters = downloader.get_chapter_links(manga_url, language_filter='en')
+                    for chapter in chapters:
+                        if ChapterInfo and isinstance(chapter, ChapterInfo):
+                            chapter_data = ChapterData(
+                                chapter_number=chapter.chapter_number,
+                                chapter_name=chapter.title or f"Chapter {chapter.chapter_number}",
+                                chapter_url=chapter.chapter_url or chapter.chapter_id,
+                                language='en',
+                                volume_number=chapter.volume_number or "",
+                                is_downloaded=False
+                            )
+                            self.db_manager.add_or_update_chapter(manga_id, chapter_data)
+            else:
+                chapters = downloader.get_chapter_links(manga_url)
+                for chapter_item in chapters:
+                    if ChapterInfo and isinstance(chapter_item, ChapterInfo):
+                        chapter_data = ChapterData(
+                            chapter_number=chapter_item.chapter_number,
+                            chapter_name=chapter_item.title or f"Chapter {chapter_item.chapter_number}",
+                            chapter_url=chapter_item.chapter_url,
+                            language=getattr(site_metadata, 'language', 'en'),
+                            is_downloaded=False
+                        )
+                    elif isinstance(chapter_item, (tuple, list)) and len(chapter_item) >= 3:
+                        chapter_num, chapter_name, chapter_url = chapter_item[:3]
+                        chapter_data = ChapterData(
+                            chapter_number=chapter_num,
+                            chapter_name=chapter_name,
+                            chapter_url=chapter_url,
+                            language=getattr(site_metadata, 'language', 'en'),
+                            is_downloaded=False
+                        )
+                    else:
+                        continue
+                    
+                    self.db_manager.add_or_update_chapter(manga_id, chapter_data)
             
             if hasattr(downloader, 'create_metadata_file') and self.download_path:
                 manga_path = os.path.join(self.download_path, title)
@@ -382,8 +451,9 @@ class DownloadManager:
                 manga_name = current_item['manga_name']
                 
                 if manga_name in self.cancelled_downloads:
-                    self.cancelled_downloads.remove(manga_name)
-                    self.download_queue.pop(0)
+                    self.cancelled_downloads.discard(manga_name)
+                    if self.download_queue and self.download_queue[0] is current_item:
+                        self.download_queue.pop(0)
                     self.signals.queue_updated.emit()
                     continue
                 
@@ -392,12 +462,16 @@ class DownloadManager:
                 
                 try:
                     self._download_manga(current_item)
-                    self.signals.manga_completed.emit(manga_name)
+                    was_cancelled = manga_name in self.cancelled_downloads
+                    self.cancelled_downloads.discard(manga_name)
+                    if not was_cancelled:
+                        self.signals.manga_completed.emit(manga_name)
                 except Exception as e:
                     logging.error(f"Error downloading {manga_name}: {e}")
                     self.signals.manga_failed.emit(manga_name, str(e))
                 
-                self.download_queue.pop(0)
+                if self.download_queue and self.download_queue[0] is current_item:
+                    self.download_queue.pop(0)
                 self.signals.queue_updated.emit()
                 
         except Exception as e:
@@ -413,6 +487,7 @@ class DownloadManager:
         site_type = item['site_type']
         chapters_to_download = item.get('chapters')
         manga_id = item.get('manga_id')
+        item_language = item.get('language') or getattr(self, '_current_chapter_language', 'en') or 'en'
         
         if not self.download_path:
             error_msg = "Download path is not set. Please set a download path in settings."
@@ -421,6 +496,9 @@ class DownloadManager:
             return
         
         downloader = self.downloaders[site_type]
+        
+        if hasattr(downloader, 'current_url'):
+            downloader.current_url = url
         
         try:
             if not chapters_to_download:
@@ -436,9 +514,11 @@ class DownloadManager:
                 self.signals.manga_failed.emit(manga_name, error_msg)
                 return
             
-            self._copy_cover_to_manga_folder(manga_name, manga_id)
-            
-            self._create_metadata_files(manga_name, manga_id)
+            sm = self.settings_manager
+            if not sm or sm.get_save_cover():
+                self._copy_cover_to_manga_folder(manga_name, manga_id)
+            if not sm or sm.get_save_comicinfo() or sm.get_save_series_json():
+                self._create_metadata_files(manga_name, manga_id)
             
             total_chapters = len(chapters_to_download)
             completed_chapters = 0
@@ -463,7 +543,8 @@ class DownloadManager:
                 
                 chapter_data = None
                 if manga_id:
-                    db_chapters = self.db_manager.get_chapters_for_manga(manga_id)
+                    lang_filter = item_language if site_type == 'mangadex' else None
+                    db_chapters = self.db_manager.get_chapters_for_manga(manga_id, language=lang_filter)
                     for ch in db_chapters:
                         ch_num_extracted = self._extract_chapter_number(ch['chapter_number'])
                         if (ch['chapter_number'] == chapter_num or 
@@ -473,25 +554,46 @@ class DownloadManager:
                             logging.info(f"Found chapter in database: {ch['chapter_number']}")
                             break
                 
+                fallback_chapter_item = None
                 if not chapter_data:
                     logging.warning(f"Chapter {chapter_num} not found in database for {manga_name}, attempting to get chapter info from site")
                     try:
-                        all_chapters = downloader.get_chapter_links(url)
+                        if site_type == 'mangadex' and hasattr(downloader, 'get_chapter_links'):
+                            all_chapters = downloader.get_chapter_links(url, language_filter=item_language)
+                        else:
+                            all_chapters = downloader.get_chapter_links(url)
                         chapter_url = None
                         chapter_name = f"Chapter {actual_chapter_num}"
                         
-                        for ch_num, ch_name, ch_url in all_chapters:
-                            if (ch_num == chapter_num or 
-                                ch_num == actual_chapter_num or
+                        for chapter_item in all_chapters:
+                            if isinstance(chapter_item, ChapterInfo):
+                                ch_num = getattr(chapter_item, 'chapter_number', '')
+                                ch_name = getattr(chapter_item, 'title', '') or f"Chapter {ch_num}"
+                                ch_url = getattr(chapter_item, 'chapter_url', '') or getattr(chapter_item, 'chapter_id', '')
+                            elif isinstance(chapter_item, (tuple, list)) and len(chapter_item) >= 3:
+                                ch_num, ch_name, ch_url = chapter_item[:3]
+                            else:
+                                continue
+                                
+                            if (str(ch_num) == str(chapter_num) or 
                                 str(ch_num) == str(actual_chapter_num) or
                                 ch_num == f"Chapter {actual_chapter_num}"):
                                 chapter_url = ch_url
                                 chapter_name = ch_name
+                                fallback_chapter_item = chapter_item if isinstance(chapter_item, ChapterInfo) else None
                                 logging.info(f"Found matching chapter: {ch_num} -> {ch_url}")
                                 break
                         
                         if not chapter_url:
-                            available_chapters = [(ch_num, ch_name) for ch_num, ch_name, _ in all_chapters[:5]]
+                            available_chapters = []
+                            for chapter_item in all_chapters[:5]:
+                                if isinstance(chapter_item, ChapterInfo):
+                                    ch_num = getattr(chapter_item, 'chapter_number', '')
+                                    ch_name = getattr(chapter_item, 'title', '') or f"Chapter {ch_num}"
+                                    available_chapters.append((ch_num, ch_name))
+                                elif isinstance(chapter_item, (tuple, list)) and len(chapter_item) >= 2:
+                                    available_chapters.append((chapter_item[0], chapter_item[1]))
+                            
                             logging.error(f"Could not find chapter {chapter_num} (extracted: {actual_chapter_num}) URL for {manga_name}")
                             logging.error(f"Available chapters (first 5): {available_chapters}")
                             self.signals.chapter_failed.emit(manga_name, chapter_num, "Chapter URL not found")
@@ -508,18 +610,41 @@ class DownloadManager:
                 
                 try:
                     chapter_path = self._download_chapter(
-                        chapter_url, actual_chapter_num, manga_name, site_type, chapter_name
+                        chapter_url, actual_chapter_num, manga_name, site_type, chapter_name,
+                        chapter_info_override=fallback_chapter_item
                     )
                     
+                    if manga_name in self.cancelled_downloads:
+                        logging.info(f"Chapter {chapter_num} interrupted by cancel for {manga_name}")
+                        break
+                    
                     if chapter_path and manga_id:
-                        self.db_manager.mark_chapter_downloaded(manga_id, chapter_num, chapter_path)
+                        chapter_lang = chapter_data.get('language') if chapter_data else (item_language if site_type == 'mangadex' else None)
+                        if not chapter_data and fallback_chapter_item and site_type == 'mangadex' and chapter_lang:
+                            new_chapter_data = ChapterData(
+                                chapter_number=chapter_num,
+                                chapter_name=chapter_name or f"Chapter {actual_chapter_num}",
+                                chapter_url=chapter_url,
+                                language=chapter_lang,
+                                volume_number=getattr(fallback_chapter_item, 'volume_number', '') or '',
+                                is_downloaded=True,
+                                download_date=datetime.now().isoformat(),
+                                file_path=chapter_path
+                            )
+                            self.db_manager.add_or_update_chapter(manga_id, new_chapter_data)
+                            logging.info(f"Inserted fallback chapter {chapter_num} ({chapter_lang}) into database")
+                        else:
+                            self.db_manager.mark_chapter_downloaded(manga_id, chapter_num, chapter_path, language=chapter_lang)
                         logging.info(f"Marked chapter {chapter_num} as downloaded")
                     
-                    self.signals.chapter_completed.emit(manga_name, chapter_num, chapter_path or "")
-                    completed_chapters += 1
-                    
-                    progress = int((completed_chapters / total_chapters) * 100)
-                    self.signals.manga_progress.emit(manga_name, progress)
+                    if chapter_path:
+                        self._maybe_embed_metadata_in_cbz(chapter_path, manga_name, manga_id)
+                        self.signals.chapter_completed.emit(manga_name, chapter_num, chapter_path)
+                        completed_chapters += 1
+                        progress = int((completed_chapters / total_chapters) * 100)
+                        self.signals.manga_progress.emit(manga_name, progress)
+                    else:
+                        self.signals.chapter_failed.emit(manga_name, chapter_num, "Download failed or returned no file")
                     
                 except Exception as e:
                     logging.error(f"Failed to download chapter {chapter_num}: {e}")
@@ -532,7 +657,7 @@ class DownloadManager:
             logging.error(f"Error downloading manga {manga_name}: {e}")
             raise
         
-    def _download_chapter(self, chapter_url: str, chapter_num: str, manga_name: str, site_type: str, chapter_name: Optional[str] = None) -> str:
+    def _download_chapter(self, chapter_url: str, chapter_num: str, manga_name: str, site_type: str, chapter_name: Optional[str] = None, chapter_info_override=None) -> str:
         """Download a single chapter."""
         if not self.download_path:
             error_msg = "Download path is not set"
@@ -541,10 +666,12 @@ class DownloadManager:
         
         downloader = self.downloaders[site_type]
         
-        def progress_callback(current: int, total: int):
+        def progress_callback(current: int, total: int, message: str = ""):
             if manga_name not in self.cancelled_downloads:
                 progress = int(current / total * 100) if total > 0 else 0
                 self.signals.chapter_progress.emit(manga_name, chapter_num, progress)
+                if message:
+                    logging.info(f"Progress: {message}")
         
         try:
             logging.info(f"Downloading chapter {chapter_num} to path: {self.download_path}")
@@ -555,15 +682,40 @@ class DownloadManager:
                     self.download_path, progress_callback
                 )
             else:
-                result = downloader.download_chapter(
-                    chapter_url, chapter_num, manga_name, 
-                    self.download_path, progress_callback
-                )
+                extra_params = {}
+                if site_type == 'mangadex':
+                    if hasattr(self, '_current_chapter_language'):
+                        extra_params['language'] = self._current_chapter_language
+                    if chapter_info_override is not None:
+                        extra_params['chapter_info'] = chapter_info_override
+                    elif hasattr(self, '_current_chapter_info'):
+                        extra_params['chapter_info'] = self._current_chapter_info
+                    extra_params['cancel_check'] = lambda: manga_name in self.cancelled_downloads
+                    extra_params['pause_check'] = lambda: manga_name in self.paused_downloads
+                
+                if site_type == 'mangadex' and hasattr(downloader, 'download_chapter'):
+                    result = downloader.download_chapter(
+                        chapter_url, chapter_num, manga_name, 
+                        self.download_path, progress_callback, **extra_params
+                    )
+                else:
+                    result = downloader.download_chapter(
+                        chapter_url, chapter_num, manga_name, 
+                        self.download_path, progress_callback
+                    )
             
             if isinstance(result, dict):
+                if not result.get('success', True):
+                    logging.error(f"Chapter download failed: {result.get('error', 'Unknown error')}")
+                    return ""
                 return result.get('path', '')
             else:
-                return result or ''
+                path = result or ''
+                if path:
+                    logging.info(f"Chapter downloaded successfully to: {path}")
+                else:
+                    logging.warning("Chapter download completed but no path returned")
+                return path
                 
         except Exception as e:
             logging.error(f"Error downloading chapter {chapter_num}: {e}")
@@ -578,23 +730,11 @@ class DownloadManager:
                 logging.info(f"Download path set to: {path}")
             except Exception as e:
                 logging.error(f"Failed to create download path {path}: {e}")
-                default_path = os.path.join(os.path.expanduser("~"), "Downloads", "Manga")
-                try:
-                    os.makedirs(default_path, exist_ok=True)
-                    self.download_path = default_path
-                    logging.info(f"Using default download path: {default_path}")
-                except Exception as e2:
-                    logging.error(f"Failed to create default download path: {e2}")
-                    self.download_path = None
-        else:
-            default_path = os.path.join(os.path.expanduser("~"), "Downloads", "Manga")
-            try:
-                os.makedirs(default_path, exist_ok=True)
-                self.download_path = default_path
-                logging.info(f"Using default download path: {default_path}")
-            except Exception as e:
-                logging.error(f"Failed to create default download path: {e}")
-                self.download_path = None
+    
+    def set_chapter_context(self, language: str = 'en', chapter_info=None):
+        """Set current chapter context for proper filename generation."""
+        self._current_chapter_language = language
+        self._current_chapter_info = chapter_info
     
     def _copy_cover_to_manga_folder(self, manga_name: str, manga_id: Optional[int]) -> None:
         """Copy cover image to manga download folder."""
@@ -687,8 +827,11 @@ class DownloadManager:
             import json
             genres_list = []
             try:
-                if manga_data.get('genres'):
-                    genres_list = json.loads(manga_data['genres'])
+                genres_val = manga_data.get('genres')
+                if isinstance(genres_val, list):
+                    genres_list = genres_val
+                elif isinstance(genres_val, str) and genres_val:
+                    genres_list = json.loads(genres_val)
             except:
                 genres_list = []
             
@@ -708,21 +851,94 @@ class DownloadManager:
                     except:
                         should_create_comicinfo = True
             
-            if should_create_comicinfo:
-                comic_info_xml = self._generate_comic_info_xml(manga_data, genres_list)
-                with open(comic_info_path, 'w', encoding='utf-8') as f:
-                    f.write(comic_info_xml)
-                logging.info(f"Created ComicInfo.xml: {comic_info_path}")
-            
-            series_json_path = os.path.join(manga_folder, "series.json")
-            if not os.path.exists(series_json_path):
-                series_metadata = self._generate_series_json(manga_data, genres_list)
-                with open(series_json_path, 'w', encoding='utf-8') as f:
-                    json.dump(series_metadata, f, indent=2, ensure_ascii=False)
-                logging.info(f"Created series.json: {series_json_path}")
+            sm = self.settings_manager
+            if not sm or sm.get_save_comicinfo():
+                if should_create_comicinfo:
+                    comic_info_xml = self._generate_comic_info_xml(manga_data, genres_list)
+                    with open(comic_info_path, 'w', encoding='utf-8') as f:
+                        f.write(comic_info_xml)
+                    logging.info(f"Created ComicInfo.xml: {comic_info_path}")
+
+            if not sm or sm.get_save_series_json():
+                series_json_path = os.path.join(manga_folder, "series.json")
+                if not os.path.exists(series_json_path):
+                    series_metadata = self._generate_series_json(manga_data, genres_list)
+                    with open(series_json_path, 'w', encoding='utf-8') as f:
+                        json.dump(series_metadata, f, indent=2, ensure_ascii=False)
+                    logging.info(f"Created series.json: {series_json_path}")
             
         except Exception as e:
             logging.error(f"Error creating metadata files: {e}")
+    
+    def _maybe_embed_metadata_in_cbz(self, cbz_path: str, manga_name: str, manga_id: Optional[int]) -> None:
+        """Embed ComicInfo.xml and/or cover image inside the CBZ if the settings request it."""
+        sm = self.settings_manager
+        if not sm:
+            return
+        embed_comicinfo = sm.get_embed_comicinfo_in_cbz()
+        embed_cover = sm.get_embed_cover_in_cbz()
+        if not embed_comicinfo and not embed_cover:
+            return
+        if not cbz_path or not os.path.exists(cbz_path):
+            return
+        try:
+            import zipfile as _zf
+            with _zf.ZipFile(cbz_path, 'a', _zf.ZIP_DEFLATED) as zf:
+                existing = set(zf.namelist())
+
+                if embed_comicinfo and 'ComicInfo.xml' not in existing:
+                    xml_content = None
+                    if manga_id:
+                        manga_list = self.db_manager.get_manga_list()
+                        for manga_data in manga_list:
+                            if manga_data['id'] == manga_id:
+                                import json as _json
+                                genres_list = []
+                                try:
+                                    genres_val = manga_data.get('genres')
+                                    if isinstance(genres_val, list):
+                                        genres_list = genres_val
+                                    elif isinstance(genres_val, str) and genres_val:
+                                        genres_list = _json.loads(genres_val)
+                                except Exception:
+                                    pass
+                                xml_content = self._generate_comic_info_xml(manga_data, genres_list)
+                                break
+                    if xml_content:
+                        zf.writestr('ComicInfo.xml', xml_content.encode('utf-8'))
+                        logging.info(f"Embedded ComicInfo.xml into {os.path.basename(cbz_path)}")
+
+                if embed_cover and 'cover.png' not in existing:
+                    cover_source = None
+                    if self.download_path:
+                        safe_name = re.sub(r'[<>"/\\|?*]', '_', manga_name)
+                        folder_cover = os.path.join(self.download_path, safe_name, 'cover.png')
+                        if os.path.exists(folder_cover):
+                            cover_source = folder_cover
+                    if not cover_source and manga_id:
+                        manga_list = self.db_manager.get_manga_list()
+                        for manga_data in manga_list:
+                            if manga_data['id'] == manga_id:
+                                p = manga_data.get('cover_image_path', '')
+                                if p and os.path.exists(p):
+                                    cover_source = p
+                                break
+                    if cover_source:
+                        try:
+                            from PIL import Image as _Image
+                            import io as _io
+                            with _Image.open(cover_source) as img:
+                                if img.mode in ('RGBA', 'LA', 'P'):
+                                    img = img.convert('RGB')
+                                buf = _io.BytesIO()
+                                img.save(buf, 'PNG')
+                                zf.writestr('cover.png', buf.getvalue())
+                        except ImportError:
+                            with open(cover_source, 'rb') as f:
+                                zf.writestr('cover.png', f.read())
+                        logging.info(f"Embedded cover.png into {os.path.basename(cbz_path)}")
+        except Exception as e:
+            logging.error(f"Error embedding metadata into CBZ {cbz_path}: {e}")
     
     def _generate_comic_info_xml(self, manga_data: dict, genres_list: List[str]) -> str:
         """Generate ComicInfo.xml content for comic readers."""

@@ -52,12 +52,10 @@ class MangaKatanaDownloader(ComicSiteBase):
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Title
             title_elem = soup.select_one('h1.heading') or soup.select_one('h1') or soup.select_one('.manga-title')
             if title_elem:
                 metadata.title = title_elem.get_text(strip=True)
             
-            # Cover image - MangaKatana uses cover images in specific locations
             cover_img = soup.select_one('div.cover img') or soup.select_one('.manga-cover img') or soup.select_one('img[src*="cover"]')
             if cover_img and hasattr(cover_img, 'get'):
                 src = cover_img.get('src')
@@ -71,18 +69,15 @@ class MangaKatanaDownloader(ComicSiteBase):
             if info_section:
                 info_text = info_section.get_text()
                 
-                # Extract Alternative names
                 alt_match = re.search(r'Alt name\(s\):\s*([^\n]+)', info_text, re.IGNORECASE)
                 if alt_match:
                     alt_names = [name.strip() for name in alt_match.group(1).split(';') if name.strip()]
                     metadata.alternative_names = alt_names
                 
-                # Extract Author/Artist
                 author_match = re.search(r'Author\(s\)\s*/\s*Artist\(s\):\s*([^\n]+)', info_text, re.IGNORECASE)
                 if author_match:
                     metadata.author = author_match.group(1).strip()
                 
-                # Extract Genres
                 genres_match = re.search(r'Genres:\s*([^\n]+)', info_text, re.IGNORECASE)
                 if genres_match:
                     genres_text = genres_match.group(1).strip()
@@ -93,7 +88,6 @@ class MangaKatanaDownloader(ComicSiteBase):
                             genres.append(part.strip())
                     metadata.genres = genres
                 
-                # Extract Status
                 status_match = re.search(r'Status:\s*([^\n]+)', info_text, re.IGNORECASE)
                 if status_match:
                     status_text = status_match.group(1).strip().lower()
@@ -106,13 +100,11 @@ class MangaKatanaDownloader(ComicSiteBase):
                     }
                     metadata.status = status_map.get(status_text, 'unknown')
                 
-                # Extract Latest chapter info for release date
                 latest_match = re.search(r'Latest chapter\(s\):\s*([^\n]+)', info_text, re.IGNORECASE)
                 if latest_match:
                     latest_text = latest_match.group(1).strip()
                     metadata.release_date = latest_text
                 
-                # Extract Update date
                 update_match = re.search(r'Update at:\s*([^\n]+)', info_text, re.IGNORECASE)
                 if update_match:
                     update_text = update_match.group(1).strip()
@@ -258,10 +250,10 @@ class MangaKatanaDownloader(ComicSiteBase):
             
             if os.path.exists(cbz_path):
                 if os.path.getsize(cbz_path) > 0:
-                    print(f"Chapter {chapter_num} already exists, skipping...")
+                    logger.debug(f"Chapter {chapter_num} already exists, skipping")
                     return {"path": cbz_path, "url": chapter_url, "success": True}
                 else:
-                    print(f"Found empty file for Chapter {chapter_num}, removing and redownloading...")
+                    logger.info(f"Found empty file for Chapter {chapter_num}, removing and redownloading")
                     os.remove(cbz_path)
             
             logger.info(f"Starting download of {manga_name} chapter {chapter_num}")
@@ -382,8 +374,10 @@ class MangaKatanaDownloader(ComicSiteBase):
             except Exception as sort_error:
                 logger.warning(f"Could not sort image URLs naturally: {sort_error}")
             
-            # create CBZ
             successful_downloads = 0
+            total_images = len(image_urls)
+            if progress_callback:
+                progress_callback(0, total_images)
             with zipfile.ZipFile(cbz_path, 'w') as cbz:
                 for idx, img_url in enumerate(image_urls, 1):
                     try:
@@ -401,7 +395,9 @@ class MangaKatanaDownloader(ComicSiteBase):
                                 cbz.writestr(img_filename, img_response.content)
                                 successful_downloads += 1
                                 img_downloaded = True
-                                logger.debug(f"Downloaded image {idx}/{len(image_urls)} ({len(img_response.content)} bytes)")
+                                logger.debug(f"Downloaded image {idx}/{total_images} ({len(img_response.content)} bytes)")
+                                if progress_callback:
+                                    progress_callback(idx, total_images)
                                 break
                             except Exception as e:
                                 if img_attempt < 2:
@@ -415,7 +411,6 @@ class MangaKatanaDownloader(ComicSiteBase):
                     except Exception as img_error:
                         logger.error(f"Error processing image {idx}: {img_error}")
             
-            # Verify CBZ was created successfully
             if not os.path.exists(cbz_path) or os.path.getsize(cbz_path) < 1000:
                 logger.error(f"CBZ file is too small or missing (size: {os.path.getsize(cbz_path) if os.path.exists(cbz_path) else 0} bytes)")
                 if os.path.exists(cbz_path):
@@ -463,7 +458,6 @@ class MangaKatanaDownloader(ComicSiteBase):
             return []
 
 
-# Backward compatibility functions
 def get_manga_name(url: str) -> str:
     """Backward compatibility function."""
     downloader = MangaKatanaDownloader()

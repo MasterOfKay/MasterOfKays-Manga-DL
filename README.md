@@ -2,11 +2,15 @@
 
 A Python-based manga downloader that supports downloading from multiple manga sites for offline reading.
 
+
+## Warning! Yes i use AI for the UI. SO the code for downlading is 99% myself while the UI code is 85% Ai generetaded. Also Readme and some Englisch translation where made by AI or Google Translate, as ENglisch is not my native language. Have a good one
+
 ## Currently Supported Sites
 
 - [AsuraScans](https://asuracomic.net)
 - [MangaKatana](https://mangakatana.com)
 - [Webtoon](https://www.webtoons.com)
+- MangaDex
 
 ## Features
 
@@ -41,6 +45,7 @@ The executable version includes all required dependencies and works without any 
 
 1. Clone this repository or download the ZIP file
 2. Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -50,10 +55,13 @@ pip install -r requirements.txt
 ### Quick Start
 
 #### Using the Executable (Windows)
+
 Simply double-click `MangaDownloader.exe` to launch the GUI version.
 
 #### Using Python
+
 Run the launcher script to automatically select the best available interface:
+
 ```bash
 python run.py
 ```
@@ -63,6 +71,7 @@ python run.py
 #### GUI Interface (gui.py)
 
 The GUI interface provides:
+
 - Easy-to-use form for entering manga URLs
 - Chapter selection dialog
 - Download queue management
@@ -78,6 +87,7 @@ python gui.py
 ##### Setting Custom Download Path
 
 You can now specify where you want your manga downloads to be saved:
+
 1. Use the "Save Path" field to view or edit the current download path
 2. Click "Browse..." to select a folder using the file explorer
 3. Your chosen path will be remembered between application restarts
@@ -87,6 +97,7 @@ You can now specify where you want your manga downloads to be saved:
 #### Enhanced CLI (enhanced_dl.py)
 
 A menu-based CLI interface with:
+
 - Interactive menu
 - Chapter browser
 - Download status display
@@ -99,6 +110,7 @@ python enhanced_dl.py
 #### Basic CLI (dl.py)
 
 Simple command-line interface for:
+
 - Quick chapter downloads
 - Batch processing
 
@@ -109,25 +121,30 @@ python dl.py
 ### Download Examples
 
 #### GUI Mode
+
 1. Enter the manga URL in the input field
 2. Click "Download" button
 3. Select chapters you want to download
 4. Manage downloads from the queue
 
 #### CLI Mode
+
 Enter a manga URL and optionally a chapter range:
 
 1. **Download all chapters:**
+
 ```
 https://asuracomic.net/series/i-obtained-a-mythic-item
 ```
 
 2. **Download a single chapter:**
+
 ```
 https://asuracomic.net/series/i-obtained-a-mythic-item 34
 ```
 
 3. **Download a range of chapters:**
+
 ```
 https://www.webtoons.com/de/romance/hot-guy-and-a-beast/list?title_no=4374 5-10
 ```
@@ -135,6 +152,7 @@ https://www.webtoons.com/de/romance/hot-guy-and-a-beast/list?title_no=4374 5-10
 ### Output Structure
 
 By default, downloads will be organized as follows:
+
 ```
 Current Directory/
 └── Manga Name/
@@ -144,6 +162,7 @@ Current Directory/
 ```
 
 When using a custom path, the structure will be:
+
 ```
 Your Selected Path/
 └── Manga Name/
@@ -155,10 +174,12 @@ Your Selected Path/
 ## Requirements
 
 ### For Executable Version
+
 - Windows operating system
 - No additional requirements
 
 ### For Source Code Version
+
 - Python 3.6+
 - Required packages (installed via requirements.txt):
   - requests
@@ -188,6 +209,7 @@ This tool is for personal use only. Please support the content creators by purch
 ## Contributing
 
 Feel free to:
+
 - Report bugs via issues
 - Suggest new features
 - Submit pull requests

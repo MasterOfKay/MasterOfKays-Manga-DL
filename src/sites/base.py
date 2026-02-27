@@ -12,19 +12,65 @@ import json
 from urllib.parse import urljoin, urlparse
 
 
+class ChapterInfo:
+    """Enhanced chapter information structure for complex sites like MangaDex."""
+    def __init__(self):
+        self.chapter_number: str = ""
+        self.volume_number: str = ""
+        self.title: str = ""
+        self.language: str = "en"
+        self.translator: str = ""
+        self.scanlation_group: str = ""
+        self.release_date: str = ""
+        self.chapter_url: str = ""
+        self.pages: int = 0
+        self.chapter_id: str = ""
+        
+    def get_display_name(self) -> str:
+        """Get formatted display name for chapter."""
+        parts = []
+        if self.volume_number:
+            parts.append(f"Vol.{self.volume_number}")
+        if self.chapter_number:
+            parts.append(f"Ch.{self.chapter_number}")
+        if self.title:
+            parts.append(self.title)
+        
+        display = " - ".join(parts) if parts else "Unknown Chapter"
+        
+        info_parts = []
+        if self.language and self.language != "en":
+            info_parts.append(f"[{self.language.upper()}]")
+        if self.scanlation_group:
+            info_parts.append(f"({self.scanlation_group})")
+        
+        if info_parts:
+            display += " " + " ".join(info_parts)
+            
+        return display
+
+
 class MangaMetadata:
     """Manga metadata structure for scraped data."""
     def __init__(self):
         self.title: str = ""
+        self.url: str = ""
+        self.site_type: str = ""
         self.description: str = ""
         self.author: str = ""
+        self.artist: str = ""
         self.genres: List[str] = []
         self.status: str = "unknown"  # ongoing, completed, cancelled
         self.release_date: str = ""
         self.alternative_names: List[str] = []
         self.cover_image_url: str = ""
         self.language: str = "en"  # Default to English
-        self.translation_type: str = "official" 
+        self.translation_type: str = "official"
+        self.available_languages: List[str] = []  # All available languages
+        self.rating: float = 0.0
+        self.chapters_info: List[ChapterInfo] = []  # Enhanced chapter information
+        self.first_download: str = ""
+        self.last_updated: str = "" 
 
 
 class ComicSiteBase(ABC):
@@ -48,10 +94,15 @@ class ComicSiteBase(ABC):
         pass
     
     @abstractmethod
-    def get_chapter_links(self, url: str) -> List[Tuple[str, str, str]]:
+    def get_chapter_links(self, url: str, language_filter: Optional[str] = None) -> List[Union[Tuple[str, str, str], ChapterInfo]]:
         """
         Get all chapter links from manga page.
-        Returns list of tuples: (chapter_number, chapter_name, chapter_url)
+        For simple sites: Returns list of tuples: (chapter_number, chapter_name, chapter_url)
+        For complex sites: Returns list of ChapterInfo objects
+        
+        Args:
+            url: Manga page URL
+            language_filter: Optional language code to filter chapters (e.g., 'en', 'ja')
         """
         pass
     

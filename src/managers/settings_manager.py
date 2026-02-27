@@ -51,7 +51,12 @@ class SettingsManager:
             'download': {
                 'max_concurrent_downloads': 1,
                 'retry_attempts': 3,
-                'timeout': 30
+                'timeout': 30,
+                'save_cover': True,
+                'save_comicinfo': True,
+                'save_series_json': True,
+                'embed_comicinfo_in_cbz': False,
+                'embed_cover_in_cbz': False
             },
             'ui': {
                 'window_size': {'width': 1200, 'height': 800},
@@ -261,3 +266,39 @@ class SettingsManager:
         """Reset all settings to defaults."""
         self.settings = self._get_default_settings()
         self._save_settings()
+
+
+    def get_save_cover(self) -> bool:
+        """Return True if a cover.png should be saved inside the manga folder."""
+        return self.get('download.save_cover', True)
+
+    def set_save_cover(self, enabled: bool) -> None:
+        self.set('download.save_cover', enabled)
+
+    def get_save_comicinfo(self) -> bool:
+        """Return True if ComicInfo.xml should be saved inside the manga folder."""
+        return self.get('download.save_comicinfo', True)
+
+    def set_save_comicinfo(self, enabled: bool) -> None:
+        self.set('download.save_comicinfo', enabled)
+
+    def get_save_series_json(self) -> bool:
+        """Return True if series.json should be saved inside the manga folder."""
+        return self.get('download.save_series_json', True)
+
+    def set_save_series_json(self, enabled: bool) -> None:
+        self.set('download.save_series_json', enabled)
+
+    def get_embed_comicinfo_in_cbz(self) -> bool:
+        """Return True if ComicInfo.xml should be embedded inside each CBZ."""
+        return self.get('download.embed_comicinfo_in_cbz', False)
+
+    def set_embed_comicinfo_in_cbz(self, enabled: bool) -> None:
+        self.set('download.embed_comicinfo_in_cbz', enabled)
+
+    def get_embed_cover_in_cbz(self) -> bool:
+        """Return True if cover.png should be embedded inside each CBZ."""
+        return self.get('download.embed_cover_in_cbz', False)
+
+    def set_embed_cover_in_cbz(self, enabled: bool) -> None:
+        self.set('download.embed_cover_in_cbz', enabled)

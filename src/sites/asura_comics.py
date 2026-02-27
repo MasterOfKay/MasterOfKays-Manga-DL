@@ -80,9 +80,10 @@ class AsuraComicsDownloader(ComicSiteBase):
                 manga_name = '-'.join(parts[:-1])
         
         readable_name = manga_name.replace('-', ' ').title()
-        
-        if readable_name.endswith(' Asura Scans'):
-            readable_name = readable_name[:-len(' Asura Scans')].strip()
+        readable_name = re.sub(
+            r'[\s\-–—|]+asura\s*(scans?|comics?|toon|scan)?\s*$',
+            '', readable_name, flags=re.IGNORECASE
+        ).strip()
         
         return readable_name
     
@@ -100,12 +101,11 @@ class AsuraComicsDownloader(ComicSiteBase):
                          soup.find('title'))
             if title_elem:
                 title_text = title_elem.get_text(strip=True)
-                if title_text and title_text != "Asura Scans":
-                    if title_text.endswith('- Asura Scans'):
-                        title_text = title_text[:-len('- Asura Scans')].strip()
-                    elif title_text.endswith('Asura Scans'):
-                        title_text = title_text[:-len('Asura Scans')].strip()
-                    
+                title_text = re.sub(
+                    r'[\s\-–—|]+asura\s*(scans?|comics?|toon|scan)?\s*$',
+                    '', title_text, flags=re.IGNORECASE
+                ).strip()
+                if title_text and title_text.lower() not in ('asura scans', 'asura comic', 'asura comics'):
                     url_based_name = self.get_manga_name(url)
                     clean_title = title_text.replace(',', '').replace(':', '').replace(';', '')
                     clean_url = url_based_name.replace(',', '').replace(':', '').replace(';', '')
@@ -342,7 +342,6 @@ class AsuraComicsDownloader(ComicSiteBase):
         if not chapter_name:
             return ""
         
-        # Remove date patterns (upload dates)
         date_patterns = [
             r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}',
             r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}',
@@ -494,10 +493,10 @@ class AsuraComicsDownloader(ComicSiteBase):
             
             if os.path.exists(cbz_path):
                 if os.path.getsize(cbz_path) > 0:
-                    print(f"Chapter {chapter_num} already exists, skipping...")
+                    logging.debug(f"Chapter {chapter_num} already exists, skipping")
                     return cbz_path
                 else:
-                    print(f"Found empty file for Chapter {chapter_num}, removing and redownloading...")
+                    logging.info(f"Found empty file for Chapter {chapter_num}, removing and redownloading")
                     os.remove(cbz_path)
 
             headers = {
@@ -511,14 +510,14 @@ class AsuraComicsDownloader(ComicSiteBase):
             try:
                 driver = webdriver.Firefox(options=options)
             except Exception as e:
-                print(f"Failed to create Firefox driver: {e}")
+                logging.error(f"Failed to create Firefox driver: {e}")
                 try:
                     from selenium.webdriver.chrome.options import Options as ChromeOptions
                     chrome_options = ChromeOptions()
                     chrome_options.add_argument('--headless')
                     driver = webdriver.Chrome(options=chrome_options)
                 except Exception as chrome_err:
-                    print(f"Failed to create Chrome driver as well: {chrome_err}")
+                    logging.error(f"Failed to create Chrome driver as well: {chrome_err}")
                     return ""
             
             try:
@@ -527,7 +526,7 @@ class AsuraComicsDownloader(ComicSiteBase):
                 try:
                     driver.get(chapter_url)
                 except Exception as page_error:
-                    print(f"Error loading page {chapter_url}: {page_error}")
+                    logging.error(f"Error loading page {chapter_url}: {page_error}")
                     return ""
 
                 try:
@@ -535,8 +534,8 @@ class AsuraComicsDownloader(ComicSiteBase):
                         EC.presence_of_element_located((By.CLASS_NAME, "w-full.mx-auto.center"))
                     )
                 except Exception as wait_error:
-                    print(f"Timeout waiting for chapter images: {wait_error}")
-                    print("Attempting to parse page despite timeout...")
+                    logging.warning(f"Timeout waiting for chapter images: {wait_error}")
+                    logging.info("Attempting to parse page despite timeout...")
 
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
 
@@ -556,12 +555,12 @@ class AsuraComicsDownloader(ComicSiteBase):
                                 images.append(src)
                 
                 if not images:
-                    print(f"No images found for chapter {chapter_num}, URL: {chapter_url}")
-                    print("Page source contains limited HTML for debugging:", driver.page_source[:500])
+                    logging.error(f"No images found for chapter {chapter_num}, URL: {chapter_url}")
+                    logging.debug("Page source (first 500 chars): %s", driver.page_source[:500])
                     return ""
 
                 total_images = len(images)
-                print(f"Found {total_images} pages for chapter {chapter_num}")
+                logging.info(f"Found {total_images} pages for chapter {chapter_num}")
 
                 import uuid
                 temp_dir = f"temp_chapter_{chapter_num}_{uuid.uuid4().hex[:8]}"
@@ -583,11 +582,11 @@ class AsuraComicsDownloader(ComicSiteBase):
                                 break
                             except Exception as img_error:
                                 if retry < max_retries - 1:
-                                    print(f"Retry {retry+1}/{max_retries} for image {i}")
+                                    logging.debug(f"Retry {retry+1}/{max_retries} for image {i}")
                                     import time
                                     time.sleep(1)
                                 else:
-                                    print(f"Failed to download image {i} after {max_retries} attempts: {img_error}")
+                                    logging.error(f"Failed to download image {i} after {max_retries} attempts: {img_error}")
                                     raise
                         
                         if img_response:
@@ -596,7 +595,6 @@ class AsuraComicsDownloader(ComicSiteBase):
                                 img_ext = '.webp'
                             
                             img_path = os.path.join(temp_dir, f"{i:03d}{img_ext}")
-                            print(f"Downloading page {i}/{len(images)}")
                             
                             with open(img_path, 'wb') as f:
                                 f.write(img_response.content)
@@ -606,11 +604,11 @@ class AsuraComicsDownloader(ComicSiteBase):
                                 progress_callback(i, total_images)
                             
                     except Exception as e:
-                        print(f"Error downloading page {i}: {e}")
+                        logging.warning(f"Error downloading page {i}: {e}")
                         continue
 
                 if not image_paths:
-                    print("Failed to download any images")
+                    logging.error("Failed to download any images")
                     if os.path.exists(temp_dir):
                         import shutil
                         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -623,7 +621,7 @@ class AsuraComicsDownloader(ComicSiteBase):
                             with open(img_path, 'rb') as img_file:
                                 cbz.writestr(img_filename, img_file.read())
                 except Exception as zip_error:
-                    print(f"Error creating CBZ file: {zip_error}")
+                    logging.error(f"Error creating CBZ file: {zip_error}")
                     if os.path.exists(cbz_path):
                         os.remove(cbz_path)
                     return ""
@@ -633,14 +631,14 @@ class AsuraComicsDownloader(ComicSiteBase):
                         if os.path.exists(img_path):
                             os.remove(img_path)
                     except Exception as rm_error:
-                        print(f"Error removing temp file {img_path}: {rm_error}")
+                        logging.warning(f"Error removing temp file {img_path}: {rm_error}")
                 
                 try:
                     if os.path.exists(temp_dir):
                         import shutil
                         shutil.rmtree(temp_dir, ignore_errors=True)
                 except Exception as rm_dir_error:
-                    print(f"Error removing temp directory: {rm_dir_error}")
+                    logging.warning(f"Error removing temp directory: {rm_dir_error}")
 
                 return cbz_path
                 
@@ -651,14 +649,13 @@ class AsuraComicsDownloader(ComicSiteBase):
                     pass
                 
         except Exception as e:
-            print(f"Error downloading chapter {chapter_num}: {e}")
+            logging.error(f"Error downloading chapter {chapter_num}: {e}")
             cbz_path = os.path.join(self.get_safe_manga_path(manga_name, base_path), f"Chapter {chapter_num}.cbz")
             if os.path.exists(cbz_path):
                 os.remove(cbz_path)
             return ""
 
 
-# Backward compatibility functions
 def get_manga_name(url: str) -> str:
     """Backward compatibility function."""
     downloader = AsuraComicsDownloader()

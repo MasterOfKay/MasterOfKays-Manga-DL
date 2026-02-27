@@ -46,7 +46,7 @@ class DownloadItemWidget(QWidget):
         main_layout.setSpacing(10)
         
         self.cover_label = QLabel()
-        self.cover_label.setFixedSize(60, 80)
+        self.cover_label.setFixedSize(120, 160)
         self.cover_label.setStyleSheet("""
             QLabel {
                 border: 1px solid #dee2e6;
@@ -63,8 +63,10 @@ class DownloadItemWidget(QWidget):
         title_layout = QHBoxLayout()
         
         self.manga_label = QLabel(self.manga_name)
-        self.manga_label.setFont(QFont("Arial", 11, QFont.Bold))
-        self.manga_label.setWordWrap(False)
+        self.manga_label.setFont(QFont("Arial", 14, QFont.Bold))
+        self.manga_label.setWordWrap(True)
+        self.manga_label.setMinimumHeight(50)
+        self.manga_label.setMaximumHeight(70)
         
         self.status_indicator = QLabel(self.status_text.upper())
         self.status_indicator.setFont(QFont("Arial", 8, QFont.Bold))
@@ -87,7 +89,6 @@ class DownloadItemWidget(QWidget):
         title_layout.addWidget(self.manga_label, 1)
         title_layout.addWidget(self.status_indicator)
         
-        # Info layout
         info_layout = QHBoxLayout()
         
         self.site_label = QLabel(f"Site: {self.site_type.title()}")
@@ -224,23 +225,57 @@ class DownloadItemWidget(QWidget):
             }
         """)
         
-        self.setMaximumHeight(120)
+        self.setMaximumHeight(200)
+        self.setMinimumHeight(180)
         self.update_display()
     
     def load_cover_image(self):
         """Load and display the cover image."""
-        if self.cover_path and os.path.exists(self.cover_path):
+        if self.cover_path:
+            if os.path.exists(self.cover_path):
+                try:
+                    pixmap = QPixmap(self.cover_path)
+                    if not pixmap.isNull():
+                        scaled_pixmap = pixmap.scaled(self.cover_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)  # type: ignore
+                        self.cover_label.setPixmap(scaled_pixmap)
+                    else:
+                        self.set_placeholder_cover()
+                except Exception:
+                    self.set_placeholder_cover()
+            elif self.cover_path.startswith('http'):
+                self.download_cover_from_url()
+            else:
+                self.set_placeholder_cover()
+        else:
+            self.set_placeholder_cover()
+    
+    def download_cover_from_url(self):
+        """Download cover from URL in background."""
+        import requests
+        from threading import Thread
+        
+        def download():
             try:
-                pixmap = QPixmap(self.cover_path)
-                if not pixmap.isNull():
-                    scaled_pixmap = pixmap.scaled(58, 78, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # type: ignore
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                url_lower = self.cover_path.lower()
+                if 'asuracomic.net' in url_lower or 'asura.gg' in url_lower:
+                    headers['Referer'] = 'https://asuracomic.net/'
+                elif 'webtoons.com' in url_lower or 'webtoon-phinf' in url_lower:
+                    headers['Referer'] = 'https://www.webtoons.com/'
+                response = requests.get(self.cover_path, timeout=10, headers=headers)
+                response.raise_for_status()
+                
+                pixmap = QPixmap()
+                if pixmap.loadFromData(response.content):
+                    scaled_pixmap = pixmap.scaled(self.cover_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)  # type: ignore
                     self.cover_label.setPixmap(scaled_pixmap)
                 else:
                     self.set_placeholder_cover()
             except Exception:
                 self.set_placeholder_cover()
-        else:
-            self.set_placeholder_cover()
+        
+        thread = Thread(target=download, daemon=True)
+        thread.start()
     
     def set_placeholder_cover(self):
         """Set a placeholder cover image."""

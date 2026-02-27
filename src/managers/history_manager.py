@@ -34,6 +34,8 @@ class HistoryManager:
                         manga_data['last_updated'] = datetime.now().isoformat()
                     if 'site_type' not in manga_data:
                         manga_data['site_type'] = 'unknown'
+                    if manga_data['site_type'] == 'mangadex':
+                        logging.info(f"Found mangadex manga in history: {manga_name}")
                     if 'url' not in manga_data:
                         manga_data['url'] = ''
                         

@@ -23,11 +23,15 @@ try:
     from .widgets.chapter_viewer import ChapterViewer
     from .widgets.history_item import HistoryItemWidget
     from .dialogs.chapter_selection import ChapterSelectionDialog
+    from .dialogs.mangadex_chapter_selection import MangaDexChapterSelectionDialog
 
     from ..managers.download_manager import DownloadManager, DownloadSignals
     from ..managers.database_manager import DatabaseManager
     from ..managers.settings_manager import SettingsManager
     from ..managers.metadata_manager import MetadataManager
+    from ..managers.history_manager import HistoryManager
+    from ..sites.mangadex import MangaDexDownloader
+    from ..sites.base import ChapterInfo
 except ImportError:
     gui_dir = os.path.dirname(__file__)
     parent_dir = os.path.dirname(gui_dir)
@@ -40,13 +44,22 @@ except ImportError:
     from widgets.history_item import HistoryItemWidget
     try:
         from dialogs.chapter_selection import ChapterSelectionDialog
+        from src.gui.dialogs.mangadex_chapter_selection import MangaDexChapterSelectionDialog
     except ImportError:
         ChapterSelectionDialog = None
+
 
     from managers.download_manager import DownloadManager, DownloadSignals
     from managers.database_manager import DatabaseManager
     from managers.settings_manager import SettingsManager
     from managers.metadata_manager import MetadataManager
+    from managers.history_manager import HistoryManager
+    try:
+        from sites.mangadex import MangaDexDownloader
+        from sites.base import ChapterInfo
+    except ImportError:
+        MangaDexDownloader = None
+        ChapterInfo = None
 
 
 class MangaDownloaderApp(QMainWindow):
@@ -56,10 +69,11 @@ class MangaDownloaderApp(QMainWindow):
         super().__init__()
         
         self.signals = DownloadSignals()
-        self.download_manager = DownloadManager(self.signals)
-        self.db_manager = DatabaseManager()
         self.settings_manager = SettingsManager()
+        self.download_manager = DownloadManager(self.signals, self.settings_manager)
+        self.db_manager = DatabaseManager()
         self.metadata_manager = MetadataManager(self.download_manager)
+        self.history_manager = HistoryManager()
         
         self.init_ui()
         self.connect_signals()
@@ -67,7 +81,6 @@ class MangaDownloaderApp(QMainWindow):
         
         self.toast = Toast(self, self.settings_manager)
         
-        # Perform startup sync to ensure database matches files on disk
         self.perform_startup_sync()
         
     def init_ui(self):
@@ -328,6 +341,42 @@ class MangaDownloaderApp(QMainWindow):
         debug_group_layout.addWidget(debug_info)
         
         scroll_layout.addWidget(debug_group)
+        
+        file_output_group = QGroupBox("File Output")
+        file_output_layout = QVBoxLayout(file_output_group)
+        
+        self.save_cover_checkbox = QCheckBox("Save cover.png in manga folder")
+        self.save_cover_checkbox.setChecked(self.settings_manager.get_save_cover())
+        self.save_cover_checkbox.toggled.connect(self.on_save_cover_changed)
+        
+        self.save_comicinfo_checkbox = QCheckBox("Save ComicInfo.xml in manga folder")
+        self.save_comicinfo_checkbox.setChecked(self.settings_manager.get_save_comicinfo())
+        self.save_comicinfo_checkbox.toggled.connect(self.on_save_comicinfo_changed)
+        
+        self.save_series_json_checkbox = QCheckBox("Save series.json in manga folder")
+        self.save_series_json_checkbox.setChecked(self.settings_manager.get_save_series_json())
+        self.save_series_json_checkbox.toggled.connect(self.on_save_series_json_changed)
+        
+        self.embed_comicinfo_checkbox = QCheckBox("Embed ComicInfo.xml inside each chapter CBZ")
+        self.embed_comicinfo_checkbox.setChecked(self.settings_manager.get_embed_comicinfo_in_cbz())
+        self.embed_comicinfo_checkbox.toggled.connect(self.on_embed_comicinfo_changed)
+        
+        self.embed_cover_checkbox = QCheckBox("Embed cover.png inside each chapter CBZ")
+        self.embed_cover_checkbox.setChecked(self.settings_manager.get_embed_cover_in_cbz())
+        self.embed_cover_checkbox.toggled.connect(self.on_embed_cover_changed)
+        
+        fo_info = QLabel("Embedding adds files into new CBZ chapters only. Existing CBZ files are not modified.")
+        fo_info.setStyleSheet("color: #666; font-size: 10px;")
+        fo_info.setWordWrap(True)
+        
+        file_output_layout.addWidget(self.save_cover_checkbox)
+        file_output_layout.addWidget(self.save_comicinfo_checkbox)
+        file_output_layout.addWidget(self.save_series_json_checkbox)
+        file_output_layout.addWidget(self.embed_comicinfo_checkbox)
+        file_output_layout.addWidget(self.embed_cover_checkbox)
+        file_output_layout.addWidget(fo_info)
+        
+        scroll_layout.addWidget(file_output_group)
         
         color_group = QGroupBox("Color Scheme")
         color_group_layout = QVBoxLayout(color_group)
@@ -614,36 +663,167 @@ class MangaDownloaderApp(QMainWindow):
         manga_name = downloader.get_manga_name(url)
         
         try:
-            chapters = downloader.get_chapter_links(url)
-            if not chapters:
-                self.show_toast("No chapters found", "error")
-                return
-            
-            if ChapterSelectionDialog:
-                dialog = ChapterSelectionDialog(manga_name, chapters, self)
-                if dialog.exec_() == dialog.Accepted:
-                    selected_chapters = dialog.get_selected_chapters()
-                    if selected_chapters:
-                        chapter_status = {ch: "not_selected" for ch in chapters}
-                        for ch in selected_chapters:
-                            chapter_status[ch] = "queued"
-                        self.chapter_viewer.set_manga(manga_name, url, chapters, chapter_status)
-                        
-                        selected_chapter_nums = [ch[0] for ch in selected_chapters]
-                        success = self.download_manager.add_to_queue(url, selected_chapter_nums)
-                        if success:
-                            self.url_input.clear()
+            if site_type == 'mangadex' and MangaDexDownloader:
+                self.handle_mangadex_download(url, downloader, manga_name)
             else:
-                chapter_status = {ch: "queued" for ch in chapters}
-                self.chapter_viewer.set_manga(manga_name, url, chapters, chapter_status)
+                chapters = downloader.get_chapter_links(url)
+                if not chapters:
+                    self.show_toast("No chapters found", "error")
+                    return
                 
-                chapter_nums = [ch[0] for ch in chapters]
-                success = self.download_manager.add_to_queue(url, chapter_nums)
-                if success:
-                    self.url_input.clear()
+                if ChapterSelectionDialog:
+                    dialog = ChapterSelectionDialog(
+                        manga_name, 
+                        chapters, 
+                        self,
+                        is_enhanced=True  # Use enhanced UI for all sites
+                    )
+                    if dialog.exec_() == dialog.Accepted:
+                        selected_chapters = dialog.get_selected_chapters()
+                        if selected_chapters:
+                            chapter_status = {ch: "not_selected" for ch in chapters}
+                            for ch in selected_chapters:
+                                chapter_status[ch] = "queued"
+                            self.chapter_viewer.set_manga(manga_name, url, chapters, chapter_status)
+                            
+                            selected_chapter_nums = [ch[0] for ch in selected_chapters]
+                            success = self.download_manager.add_to_queue(url, selected_chapter_nums)
+                            if success:
+                                self.url_input.clear()
+                else:
+                    chapter_status = {ch: "queued" for ch in chapters}
+                    self.chapter_viewer.set_manga(manga_name, url, chapters, chapter_status)
+                    
+                    chapter_nums = [ch[0] for ch in chapters]
+                    success = self.download_manager.add_to_queue(url, chapter_nums)
+                    if success:
+                        self.url_input.clear()
                     
         except Exception as e:
             self.show_toast(f"Error getting chapters: {e}", "error")
+    
+    def handle_mangadex_download(self, url: str, downloader, manga_name: str):
+        """Handle MangaDex-specific download with language selection."""
+        try:
+            metadata = downloader.get_manga_metadata(url)
+            if metadata:
+                metadata.site_type = 'mangadex'  # Ensure consistent site type
+                metadata.url = url  # Ensure URL is set
+                from datetime import datetime
+                if not hasattr(metadata, 'first_download') or not metadata.first_download:
+                    metadata.first_download = datetime.now().isoformat()
+                if not hasattr(metadata, 'last_updated') or not metadata.last_updated:
+                    metadata.last_updated = datetime.now().isoformat()
+            cover_url = metadata.cover_image_url if metadata else ""
+            manga_status = metadata.status if metadata else "unknown"
+            
+            logging.info(f"Manga metadata - Status: {manga_status}, Cover: {bool(cover_url)}")
+            
+            available_languages = downloader.get_available_languages(url)
+            
+            chapters_by_language = {}
+            for lang_code, lang_name in available_languages:
+                chapters = downloader.get_chapters_by_language(url, lang_code)
+                if chapters:
+                    chapters_by_language[lang_code] = chapters
+            
+            if not chapters_by_language:
+                self.show_toast("No chapters found for any language", "error")
+                return
+            
+            dialog = ChapterSelectionDialog(
+                manga_name, 
+                [],  # Empty chapters list for enhanced mode
+                self,
+                chapters_by_language=chapters_by_language,
+                is_enhanced=True,
+                metadata=metadata,
+                cover_url=cover_url,
+                languages=available_languages
+            )
+            
+            if dialog.exec_() == dialog.Accepted:
+                selected_chapters = dialog.get_selected_chapters()
+                selected_language = dialog.get_selected_language()
+                
+                try:
+                    from ..managers.database_manager import ChapterData, MangaMetadata as DBMetadata
+                    
+                    cover_image_path = ""
+                    if cover_url:
+                        cover_image_path = self.download_manager.download_cover_image(cover_url, manga_name)
+                    
+                    db_metadata = DBMetadata(
+                        title=manga_name,
+                        url=url,
+                        site_type='mangadex',
+                        description=metadata.description if metadata else "",
+                        author=metadata.author if metadata else "",
+                        genres=metadata.genres if metadata else [],
+                        status=manga_status,
+                        release_date=metadata.release_date if metadata else "",
+                        alternative_names=metadata.alternative_names if metadata else [],
+                        cover_image_url=cover_url,
+                        language='en',  # Default to en, but we're storing all languages
+                        translation_type='fan',
+                        last_updated=datetime.now().isoformat(),
+                        first_download=datetime.now().isoformat()
+                    )
+                    
+                    manga_id = self.db_manager.add_or_update_manga(db_metadata, cover_image_path)
+                    
+                    total_chapters = 0
+                    for lang_code, chapters in chapters_by_language.items():
+                        for chapter in chapters:
+                            if ChapterInfo and isinstance(chapter, ChapterInfo):
+                                chapter_data = ChapterData(
+                                    chapter_number=chapter.chapter_number,
+                                    chapter_name=chapter.title or f"Chapter {chapter.chapter_number}",
+                                    chapter_url=chapter.chapter_url or chapter.chapter_id,
+                                    language=lang_code,
+                                    volume_number=chapter.volume_number or "",
+                                    is_downloaded=False
+                                )
+                                
+                                self.db_manager.add_or_update_chapter(manga_id, chapter_data)
+                                total_chapters += 1
+                    
+                    logging.info(f"Stored {total_chapters} chapters across {len(chapters_by_language)} languages in database for {manga_name}")
+                    
+                except Exception as e:
+                    logging.error(f"Error storing MangaDex chapters in database: {e}")
+                
+                if selected_chapters:
+                    self.show_toast(f"Adding {len(selected_chapters)} chapters to download queue...", "info")
+                    
+                    self.download_manager.set_chapter_context(selected_language, selected_chapters[0] if selected_chapters else None)
+                    
+                    chapter_numbers = []
+                    for chapter in selected_chapters:
+                        if ChapterInfo and isinstance(chapter, ChapterInfo):
+                            chapter_numbers.append(chapter.chapter_number)
+                        else:
+                            chapter_numbers.append(str(chapter))
+                    
+                    success = self.download_manager.add_to_queue(url, chapter_numbers, metadata=metadata, language=selected_language)
+                    
+                    if success:
+                        self.history_manager.add_manga(manga_name, url, 'mangadex')
+                        logging.info(f"Added {manga_name} to history with status: {manga_status}")
+                        
+                        if manga_name in self.download_items:
+                            download_item = self.download_items[manga_name]
+                            if cover_url and hasattr(download_item, 'cover_path'):
+                                download_item.cover_path = cover_url
+                                download_item.load_cover_image()
+                    if success:
+                        self.url_input.clear()
+                        self.show_toast(f"Added {manga_name} to download queue", "success")
+                        
+                        self.populate_history_list()
+            
+        except Exception as e:
+            self.show_toast(f"Error processing MangaDex manga: {e}", "error")
     
     def populate_history_list(self):
         """Populate the history list with manga from database."""
@@ -651,6 +831,18 @@ class MangaDownloaderApp(QMainWindow):
             self.history_layout.removeWidget(item)
             item.deleteLater()
         self.history_items.clear()
+
+        import re as _re
+        _asura_suffix = _re.compile(
+            r'[\s\-\u2013\u2014|]+asura\s*(scans?|comics?|toon|scan)?\s*$',
+            _re.IGNORECASE
+        )
+        for _manga in self.db_manager.get_manga_list():
+            if _manga.get('site_type', '') in ('asura', 'asuracomics'):
+                _clean = _asura_suffix.sub('', _manga['title']).strip()
+                if _clean and _clean != _manga['title']:
+                    self.db_manager.rename_manga_title(_manga['id'], _clean)
+                    logging.info(f"Renamed '{_manga['title']}' → '{_clean}' in DB")
         
         manga_list = self.db_manager.get_manga_list()
         
@@ -675,8 +867,9 @@ class MangaDownloaderApp(QMainWindow):
                     logging.warning(f"Could not schedule metadata update for {manga_name}: {e}")
             
             chapters = self.db_manager.get_chapters_for_manga(manga_id)
-            total_chapters = len(chapters)
-            downloaded_chapters = len([ch for ch in chapters if ch.get('is_downloaded', False)])
+            unique_nums = set(ch['chapter_number'] for ch in chapters)
+            total_chapters = len(unique_nums)
+            downloaded_chapters = len(set(ch['chapter_number'] for ch in chapters if ch.get('is_downloaded', False)))
             
             last_update = manga_data.get('last_updated', 'Never')
             
@@ -769,7 +962,73 @@ class MangaDownloaderApp(QMainWindow):
             pass
         
         manga_url = manga_data.get('url', '')
-        self.chapter_viewer.set_manga(manga_name, manga_url, chapter_list, chapter_status)
+        site_type = manga_data.get('site_type', '')
+        
+        chapters_by_language = None
+        if site_type.lower() == 'mangadex':
+            if len(chapters) == 0:
+                logging.info(f"No chapters in database for {manga_name}, fetching from MangaDex API")
+                try:
+                    downloader = self.download_manager.downloaders.get('mangadex')
+                    if downloader:
+                        from ..managers.database_manager import ChapterData
+                        languages = downloader.get_available_languages(manga_url)
+                        chapters_by_language = {}
+                        total_stored = 0
+                        
+                        for lang_code, lang_name in languages:
+                            lang_chapters = downloader.get_chapters_by_language(manga_url, lang_code)
+                            if lang_chapters:
+                                chapters_by_language[lang_code] = lang_chapters
+                                
+                                for chapter in lang_chapters:
+                                    if ChapterInfo and isinstance(chapter, ChapterInfo):
+                                        chapter_data = ChapterData(
+                                            chapter_number=chapter.chapter_number,
+                                            chapter_name=chapter.title or f"Chapter {chapter.chapter_number}",
+                                            chapter_url=chapter.chapter_url or chapter.chapter_id,
+                                            language=lang_code,
+                                            volume_number=chapter.volume_number or "",
+                                            is_downloaded=False
+                                        )
+                                        self.db_manager.add_or_update_chapter(manga_id, chapter_data)
+                                        total_stored += 1
+                        
+                        logging.info(f"Stored {total_stored} chapters in database for {manga_name}")
+                        chapters = self.db_manager.get_chapters_for_manga(manga_id)
+                        self.populate_history_list()
+                        
+                except Exception as e:
+                    logging.error(f"Failed to fetch and store MangaDex chapters: {e}")
+            
+            if len(chapters) > 0:
+                try:
+                    chapters_by_language = {}
+                    chapter_status = {}
+                    
+                    for chapter in chapters:
+                        lang = chapter.get('language', 'en')
+                        if lang not in chapters_by_language:
+                            chapters_by_language[lang] = []
+                        chapters_by_language[lang].append(chapter)
+                        
+                        chapter_num = chapter.get('chapter_number', '')
+                        if chapter.get('is_downloaded', False):
+                            chapter_status[chapter_num] = "success"
+                        else:
+                            chapter_status[chapter_num] = "not_downloaded"
+                    
+                    logging.info(f"Grouped {len(chapters)} chapters into {len(chapters_by_language)} languages for {manga_name}")
+                    logging.info(f"Languages available: {list(chapters_by_language.keys())}")
+                    for lang, lang_chapters in chapters_by_language.items():
+                        logging.info(f"  {lang}: {len(lang_chapters)} chapters")
+                except Exception as e:
+                    logging.error(f"Failed to group chapters by language: {e}")
+        
+        if site_type.lower() == 'mangadex' and chapters_by_language:
+            self.chapter_viewer.set_manga(manga_name, manga_url, [], chapter_status, site_type, chapters_by_language)
+        else:
+            self.chapter_viewer.set_manga(manga_name, manga_url, chapter_list, chapter_status, site_type, None)
         
         self.chapter_viewer.setVisible(True)
         self.apply_chapter_viewer_colors()
@@ -942,6 +1201,16 @@ class MangaDownloaderApp(QMainWindow):
             item.set_scanning(False)
             item.set_has_new_chapters(has_new_chapters)
             
+            try:
+                manga_data = self.db_manager.get_manga_by_title(manga_name)
+                if manga_data:
+                    chapters = self.db_manager.get_chapters_for_manga(manga_data['id'])
+                    total = len(set(ch['chapter_number'] for ch in chapters))
+                    downloaded = len(set(ch['chapter_number'] for ch in chapters if ch.get('is_downloaded', False)))
+                    item.update_info(chapter_count=total, downloaded_count=downloaded)
+            except Exception as e:
+                logging.warning(f"Could not refresh chapter count for {manga_name}: {e}")
+            
             if has_new_chapters:
                 self.show_toast(f"New chapters found for {manga_name}", "success")
     
@@ -1059,11 +1328,19 @@ class MangaDownloaderApp(QMainWindow):
         chapter_list = []
         for chapter in selected_chapters:
             if isinstance(chapter, dict):
-                chapter_list.append(chapter.get('name', '') or chapter.get('title', ''))
+                chapter_list.append(
+                    chapter.get('chapter_number', '') or
+                    chapter.get('name', '') or
+                    chapter.get('title', '')
+                )
+            elif hasattr(chapter, 'chapter_number'):
+                chapter_list.append(chapter.chapter_number)
             else:
                 chapter_list.append(str(chapter))
         
-        self.download_manager.add_to_queue(current_url, chapter_list)
+        language = getattr(self.chapter_viewer, 'current_language', 'en') or 'en'
+        
+        self.download_manager.add_to_queue(current_url, chapter_list, language=language)
         
         self.chapter_viewer.clear_selection()
         self.chapter_viewer.hide()
@@ -1111,19 +1388,29 @@ class MangaDownloaderApp(QMainWindow):
                         except:
                             genres = []
                         status_text = manga_data.get('status', 'unknown')
+                        
+                        if manga_name == item.get('manga_name') and item.get('metadata'):
+                            status_text = getattr(item['metadata'], 'status', 'unknown')
                         cover_path = manga_data.get('cover_image_path', '')
                         break
             
+            if item.get('metadata') and hasattr(item['metadata'], 'status'):
+                actual_status = item['metadata'].status
+            else:
+                actual_status = status_text
+                
             download_widget = DownloadItemWidget(
                 manga_name, 
                 site_type=site_type,
                 description=description,
                 author=author,
                 genres=genres,
-                status_text=status_text,
+                status_text=actual_status,
                 cover_path=cover_path
             )
-            download_widget.set_status(item.get('status', 'Queued'))
+            current_downloading = getattr(self.download_manager, 'current_manga', None)
+            effective_status = 'Downloading' if manga_name == current_downloading else item.get('status', 'Queued')
+            download_widget.set_status(effective_status)
             
             if 'chapters' in item and item['chapters']:
                 download_widget.set_total_chapters(len(item['chapters']))
@@ -1160,7 +1447,6 @@ class MangaDownloaderApp(QMainWindow):
             if item['manga_name'] == manga_name:
                 manga_id = item.get('manga_id')
                 if manga_id:
-                    
                     chapters = self.db_manager.get_chapters_for_manga(manga_id, include_not_downloaded=True)
                     manga_data = None
                     manga_list = self.db_manager.get_manga_list()
@@ -1168,70 +1454,22 @@ class MangaDownloaderApp(QMainWindow):
                         if manga['id'] == manga_id:
                             manga_data = manga
                             break
-                    
-                    if manga_data and chapters:
-                        chapter_status = {}
-                        downloading_chapters = item.get('chapters', [])
-                        
-                        formatted_chapters = []
-                        for chapter in chapters:
-                            chapter_tuple = (chapter['chapter_number'], chapter['chapter_name'], chapter.get('chapter_url', ''))
-                            formatted_chapters.append(chapter_tuple)
-                            
-                            if chapter['is_downloaded']:
-                                chapter_status[chapter_tuple] = "success"
-                            else:
-                                chapter_status[chapter_tuple] = "not_downloaded"
-                        
-                        try:
-                            formatted_chapters.sort(key=lambda x: float(x[0]) if x[0].replace('.', '', 1).isdigit() else 0)
-                        except:
-                            pass
-                        
-                        self.chapter_viewer.set_manga(
-                            item['manga_name'], 
-                            manga_data.get('url', ''), 
-                            formatted_chapters, 
-                            chapter_status
-                        )
-                        self.chapter_viewer.setVisible(True)
-                        self.apply_chapter_viewer_colors()
-                        
+
+                    if manga_data:
                         self._sync_database_with_files(manga_data, chapters)
-                        
-                        chapters = self.db_manager.get_chapters_for_manga(manga_id, include_not_downloaded=True)
-                        formatted_chapters = []
-                        chapter_status = {}
-                        for chapter in chapters:
-                            chapter_tuple = (chapter['chapter_number'], chapter['chapter_name'], chapter.get('chapter_url', ''))
-                            formatted_chapters.append(chapter_tuple)
-                            
-                            if chapter['is_downloaded']:
-                                chapter_status[chapter_tuple] = "success"
-                            else:
-                                chapter_status[chapter_tuple] = "not_downloaded"
-                        
-                        try:
-                            formatted_chapters.sort(key=lambda x: float(x[0]) if x[0].replace('.', '', 1).isdigit() else 0)
-                        except:
-                            pass
-                        
-                        self.chapter_viewer.set_manga(
-                            item['manga_name'], 
-                            manga_data.get('url', ''), 
-                            formatted_chapters, 
-                            chapter_status
-                        )
-                        
+
                         if manga_name in self.download_items:
                             widget = self.download_items[manga_name]
                             queued_chapters = item.get('chapters', [])
                             if queued_chapters:
-                                queued_downloaded_count = 0
-                                for ch in chapters:
-                                    if ch['chapter_number'] in queued_chapters and ch['is_downloaded']:
-                                        queued_downloaded_count += 1
+                                chapters = self.db_manager.get_chapters_for_manga(manga_id, include_not_downloaded=True)
+                                queued_downloaded_count = sum(
+                                    1 for ch in chapters
+                                    if ch['chapter_number'] in queued_chapters and ch['is_downloaded']
+                                )
                                 widget.update_chapter_counts(queued_downloaded_count, len(queued_chapters))
+
+                        self.on_history_item_clicked(manga_name)
                 break
     
     def on_path_changed(self, path: str):
@@ -1265,7 +1503,22 @@ class MangaDownloaderApp(QMainWindow):
             self.show_toast("Debug mode enabled. Logs will be saved to manga_download.log", "info")
         else:
             self.show_toast("Debug mode disabled", "info")
-    
+
+    def on_save_cover_changed(self, enabled: bool):
+        self.settings_manager.set_save_cover(enabled)
+
+    def on_save_comicinfo_changed(self, enabled: bool):
+        self.settings_manager.set_save_comicinfo(enabled)
+
+    def on_save_series_json_changed(self, enabled: bool):
+        self.settings_manager.set_save_series_json(enabled)
+
+    def on_embed_comicinfo_changed(self, enabled: bool):
+        self.settings_manager.set_embed_comicinfo_in_cbz(enabled)
+
+    def on_embed_cover_changed(self, enabled: bool):
+        self.settings_manager.set_embed_cover_in_cbz(enabled)
+
     def on_color_pick(self, color_key: str, button: QPushButton):
         """Handle color picker button click."""
         current_color_hex = self.settings_manager.get_individual_color(color_key)
@@ -1353,6 +1606,7 @@ class MangaDownloaderApp(QMainWindow):
     def on_chapter_started(self, manga_name: str, chapter_num: str):
         """Handle chapter download started."""
         if manga_name in self.download_items:
+            self.download_items[manga_name].set_status("Downloading")
             self.download_items[manga_name].set_current_chapter_info(f"Chapter {chapter_num}")
         
         if self.chapter_viewer.current_manga_name == manga_name:
@@ -1368,7 +1622,6 @@ class MangaDownloaderApp(QMainWindow):
     
     def on_chapter_completed(self, manga_name: str, chapter_num: str, path: str):
         """Handle chapter download completed."""
-        # Update download items
         if manga_name in self.download_items:
             widget = self.download_items[manga_name]
             widget.increment_completed_chapters()
@@ -1397,8 +1650,8 @@ class MangaDownloaderApp(QMainWindow):
             if manga_info:
                 manga_id = manga_info['id']
                 chapters = self.db_manager.get_chapters_for_manga(manga_id, include_not_downloaded=True)
-                downloaded_count = sum(1 for ch in chapters if ch['is_downloaded'])
-                total_count = len(chapters)
+                total_count = len(set(ch['chapter_number'] for ch in chapters))
+                downloaded_count = len(set(ch['chapter_number'] for ch in chapters if ch['is_downloaded']))
                 history_item = self.history_items[manga_name]
                 history_item.downloaded_count = downloaded_count
                 history_item.chapter_count = total_count
@@ -1503,7 +1756,8 @@ class MangaDownloaderApp(QMainWindow):
                 if site_type == 'webtoon':
                     self.show_toast(f"Redownloading {chapter_name}", "info")
                 
-                success = self.download_manager.add_to_queue(manga_url, [chapter_name])
+                language = getattr(self.chapter_viewer, 'current_language', 'en') or 'en'
+                success = self.download_manager.add_to_queue(manga_url, [chapter_name], language=language)
                 if success:
                     self.show_toast(f"Added {chapter_name} to download queue", "info")
                     self.chapter_viewer.update_chapter_status(chapter_name, "queued")
@@ -1677,7 +1931,6 @@ class MangaDownloaderApp(QMainWindow):
                         f"Chapter {chapter_num} - {chapter_name}.cbz" if chapter_name != f'Chapter {chapter_num}' else None
                     ]
                 
-                # Check if any valid file exists
                 file_exists = False
                 valid_file_path = ""
                 
@@ -1751,6 +2004,60 @@ def main():
     window.show()
     
     sys.exit(app.exec_())
+
+
+    def refresh_mangadex_chapters_for_existing_manga(self, manga_name: str):
+        """Refresh chapters for existing MangaDex manga that have 0 chapters in database."""
+        try:
+            manga_data = self.db_manager.get_manga_by_title(manga_name)
+            if not manga_data or manga_data.get('site_type') != 'mangadex':
+                return False
+                
+            manga_url = manga_data.get('url', '')
+            if not manga_url:
+                logging.warning(f"No URL found for {manga_name}")
+                return False
+                
+            downloader = self.download_manager.downloaders.get('mangadex')
+            if not downloader:
+                logging.warning("MangaDex downloader not available")
+                return False
+                
+            available_languages = downloader.get_available_languages(manga_url)
+            chapters_by_language = {}
+            for lang_code, lang_name in available_languages:
+                chapters = downloader.get_chapters_by_language(manga_url, lang_code)
+                if chapters:
+                    chapters_by_language[lang_code] = chapters
+            
+            if not chapters_by_language:
+                logging.warning(f"No chapters found for {manga_name}")
+                return False
+                
+            from ..managers.database_manager import ChapterData
+            manga_id = manga_data.get('id')
+            total_chapters = 0
+            
+            for lang_code, chapters in chapters_by_language.items():
+                for chapter in chapters:
+                    if ChapterInfo and isinstance(chapter, ChapterInfo):
+                        chapter_data = ChapterData(
+                            chapter_number=chapter.chapter_number,
+                            chapter_name=chapter.title or f"Chapter {chapter.chapter_number}",
+                            chapter_url=chapter.chapter_url,
+                            language=lang_code,
+                            is_downloaded=False
+                        )
+                        self.db_manager.add_or_update_chapter(manga_id, chapter_data)
+                        total_chapters += 1
+
+            logging.info(f"Refreshed {total_chapters} chapters for existing MangaDex manga: {manga_name}")
+            self.populate_history_list()
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error refreshing MangaDex chapters for {manga_name}: {e}")
+            return False
 
 
 if __name__ == "__main__":

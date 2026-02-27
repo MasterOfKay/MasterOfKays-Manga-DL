@@ -43,6 +43,7 @@ class ChapterData:
     chapter_name: str
     chapter_url: str
     language: str = "en"
+    volume_number: str = ""
     is_downloaded: bool = False
     download_date: str = ""
     file_path: str = ""
@@ -105,7 +106,7 @@ class DatabaseManager:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (manga_id) REFERENCES manga (id) ON DELETE CASCADE,
-                        UNIQUE(manga_id, chapter_number)
+                        UNIQUE(manga_id, chapter_number, language)
                     )
                 ''')
                 
@@ -151,6 +152,52 @@ class DatabaseManager:
                 if 'language' not in chapters_columns:
                     logging.info("Adding language column to chapters table")
                     cursor.execute("ALTER TABLE chapters ADD COLUMN language TEXT DEFAULT 'en'")
+                
+                if 'volume_number' not in chapters_columns:
+                    logging.info("Adding volume_number column to chapters table")
+                    cursor.execute("ALTER TABLE chapters ADD COLUMN volume_number TEXT DEFAULT ''")
+                
+                cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chapters'")
+                chapters_table_sql = cursor.fetchone()
+                if chapters_table_sql and 'UNIQUE(manga_id, chapter_number, language)' not in chapters_table_sql[0]:
+                    logging.info("Migrating chapters table UNIQUE constraint to include language")
+                    try:
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS chapters_new (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                manga_id INTEGER NOT NULL,
+                                chapter_number TEXT NOT NULL,
+                                chapter_name TEXT NOT NULL,
+                                chapter_url TEXT NOT NULL,
+                                language TEXT DEFAULT 'en',
+                                is_downloaded BOOLEAN DEFAULT FALSE,
+                                download_date TEXT DEFAULT '',
+                                file_path TEXT DEFAULT '',
+                                volume_number TEXT DEFAULT '',
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                FOREIGN KEY (manga_id) REFERENCES manga (id) ON DELETE CASCADE,
+                                UNIQUE(manga_id, chapter_number, language)
+                            )
+                        ''')
+                        cursor.execute('''
+                            INSERT OR IGNORE INTO chapters_new
+                                (id, manga_id, chapter_number, chapter_name, chapter_url,
+                                 language, is_downloaded, download_date, file_path, volume_number,
+                                 created_at, updated_at)
+                            SELECT id, manga_id, chapter_number, chapter_name, chapter_url,
+                                   COALESCE(language, 'en'), is_downloaded,
+                                   COALESCE(download_date, ''), COALESCE(file_path, ''),
+                                   COALESCE(volume_number, ''), created_at, updated_at
+                            FROM chapters
+                        ''')
+                        cursor.execute('DROP TABLE chapters')
+                        cursor.execute('ALTER TABLE chapters_new RENAME TO chapters')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chapters_manga ON chapters(manga_id)')
+                        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chapters_downloaded ON chapters(is_downloaded)')
+                        logging.info("Chapters table migrated to include language in UNIQUE constraint")
+                    except Exception as migrate_err:
+                        logging.error(f"Error migrating chapters table: {migrate_err}")
                 
                 cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='manga'")
                 table_sql = cursor.fetchone()
@@ -242,6 +289,18 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Error migrating from JSON ({source_description}): {e}")
     
+    def rename_manga_title(self, manga_id: int, new_title: str) -> bool:
+        """Rename a manga title in-place (UPDATE only, preserves chapter links)."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('UPDATE manga SET title = ? WHERE id = ?', (new_title, manga_id))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logging.error(f"Error renaming manga ID {manga_id}: {e}")
+            return False
+
     def add_or_update_manga(self, metadata: MangaMetadata, cover_image_path: str = "") -> int:
         """Add or update manga metadata. Returns manga ID."""
         try:
@@ -288,12 +347,12 @@ class DatabaseManager:
                 
                 cursor.execute('''
                     INSERT OR REPLACE INTO chapters 
-                    (manga_id, chapter_number, chapter_name, chapter_url, language, is_downloaded, download_date, file_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (manga_id, chapter_number, chapter_name, chapter_url, language, volume_number, is_downloaded, download_date, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     manga_id, chapter_data.chapter_number, chapter_data.chapter_name,
-                    chapter_data.chapter_url, chapter_data.language, chapter_data.is_downloaded,
-                    chapter_data.download_date, chapter_data.file_path
+                    chapter_data.chapter_url, chapter_data.language, chapter_data.volume_number,
+                    chapter_data.is_downloaded, chapter_data.download_date, chapter_data.file_path
                 ))
                 
                 conn.commit()
@@ -470,25 +529,30 @@ class DatabaseManager:
             logging.error(f"Error getting manga by URL {url}: {e}")
             return None
     
-    def get_chapters_for_manga(self, manga_id: int, include_not_downloaded: bool = True) -> List[Dict[str, Any]]:
-        """Get all chapters for a manga."""
+    def get_chapters_for_manga(self, manga_id: int, include_not_downloaded: bool = True, language: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all chapters for a manga, optionally filtered by language."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
                 query = '''
-                    SELECT chapter_number, chapter_name, chapter_url, is_downloaded, 
+                    SELECT chapter_number, chapter_name, chapter_url, language, volume_number, is_downloaded, 
                            download_date, file_path
                     FROM chapters 
                     WHERE manga_id = ?
                 '''
+                params: list = [manga_id]
                 
                 if not include_not_downloaded:
                     query += ' AND is_downloaded = 1'
                 
-                query += ' ORDER BY chapter_number'
+                if language:
+                    query += ' AND language = ?'
+                    params.append(language)
                 
-                cursor.execute(query, (manga_id,))
+                query += ' ORDER BY CAST(chapter_number AS REAL), chapter_number'
+                
+                cursor.execute(query, params)
                 results = cursor.fetchall()
                 
                 chapters = []
@@ -497,9 +561,11 @@ class DatabaseManager:
                         'chapter_number': row[0],
                         'chapter_name': row[1],
                         'chapter_url': row[2],
-                        'is_downloaded': bool(row[3]),
-                        'download_date': row[4],
-                        'file_path': row[5]
+                        'language': row[3],
+                        'volume_number': row[4],
+                        'is_downloaded': bool(row[5]),
+                        'download_date': row[6],
+                        'file_path': row[7]
                     })
                 
                 return chapters
@@ -508,17 +574,24 @@ class DatabaseManager:
             logging.error(f"Error getting chapters for manga ID {manga_id}: {e}")
             return []
     
-    def mark_chapter_downloaded(self, manga_id: int, chapter_number: str, file_path: str = ""):
-        """Mark a chapter as downloaded."""
+    def mark_chapter_downloaded(self, manga_id: int, chapter_number: str, file_path: str = "", language: Optional[str] = None):
+        """Mark a chapter as downloaded, optionally scoped to a specific language."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
-                cursor.execute('''
-                    UPDATE chapters 
-                    SET is_downloaded = 1, download_date = ?, file_path = ?
-                    WHERE manga_id = ? AND chapter_number = ?
-                ''', (datetime.now().isoformat(), file_path, manga_id, chapter_number))
+                if language:
+                    cursor.execute('''
+                        UPDATE chapters 
+                        SET is_downloaded = 1, download_date = ?, file_path = ?
+                        WHERE manga_id = ? AND chapter_number = ? AND language = ?
+                    ''', (datetime.now().isoformat(), file_path, manga_id, chapter_number, language))
+                else:
+                    cursor.execute('''
+                        UPDATE chapters 
+                        SET is_downloaded = 1, download_date = ?, file_path = ?
+                        WHERE manga_id = ? AND chapter_number = ?
+                    ''', (datetime.now().isoformat(), file_path, manga_id, chapter_number))
                 
                 conn.commit()
                 
