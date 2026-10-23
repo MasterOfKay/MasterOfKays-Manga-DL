@@ -7,7 +7,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
 
@@ -47,6 +47,7 @@ class ChapterData:
     is_downloaded: bool = False
     download_date: str = ""
     file_path: str = ""
+    free_at: str = ""        # ISO time (UTC) an early-access chapter becomes free; '' = always free
 
 
 class DatabaseManager:
@@ -62,10 +63,18 @@ class DatabaseManager:
         self._migrate_database_schema()
         self._migrate_from_json()
         
+    def _connect(self) -> sqlite3.Connection:
+        """Open a connection. Each call gets its own connection so it is safe
+        to use from background threads; the timeout avoids 'database is locked'
+        errors when the downloader and the update checker write at once."""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
     def _initialize_database(self):
         """Initialize the SQLite database with required tables."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
@@ -125,7 +134,7 @@ class DatabaseManager:
     def _migrate_database_schema(self):
         """Migrate existing database schema to add new columns."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute("PRAGMA table_info(manga)")
@@ -156,6 +165,20 @@ class DatabaseManager:
                 if 'volume_number' not in chapters_columns:
                     logging.info("Adding volume_number column to chapters table")
                     cursor.execute("ALTER TABLE chapters ADD COLUMN volume_number TEXT DEFAULT ''")
+
+                if 'is_new' not in chapters_columns:
+                    logging.info("Adding is_new column to chapters table")
+                    cursor.execute("ALTER TABLE chapters ADD COLUMN is_new INTEGER DEFAULT 0")
+
+                if 'last_checked' not in columns:
+                    logging.info("Adding last_checked column to manga table")
+                    cursor.execute("ALTER TABLE manga ADD COLUMN last_checked TEXT DEFAULT ''")
+
+                # Older versions re-inserted manga rows (new id) on every metadata
+                # refresh, leaving chapters pointing at ids that no longer exist.
+                cursor.execute("DELETE FROM chapters WHERE manga_id NOT IN (SELECT id FROM manga)")
+                if cursor.rowcount:
+                    logging.info(f"Removed {cursor.rowcount} orphaned chapter rows")
                 
                 cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chapters'")
                 chapters_table_sql = cursor.fetchone()
@@ -199,6 +222,12 @@ class DatabaseManager:
                     except Exception as migrate_err:
                         logging.error(f"Error migrating chapters table: {migrate_err}")
                 
+                # After the rebuild above, which would drop it again.
+                cursor.execute("PRAGMA table_info(chapters)")
+                if 'free_at' not in [column[1] for column in cursor.fetchall()]:
+                    logging.info("Adding free_at (early access) column to chapters table")
+                    cursor.execute("ALTER TABLE chapters ADD COLUMN free_at TEXT DEFAULT ''")
+
                 cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='manga'")
                 table_sql = cursor.fetchone()
                 if table_sql and 'UNIQUE(title, language)' not in table_sql[0]:
@@ -292,7 +321,7 @@ class DatabaseManager:
     def rename_manga_title(self, manga_id: int, new_title: str) -> bool:
         """Rename a manga title in-place (UPDATE only, preserves chapter links)."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute('UPDATE manga SET title = ? WHERE id = ?', (new_title, manga_id))
                 conn.commit()
@@ -302,76 +331,239 @@ class DatabaseManager:
             return False
 
     def add_or_update_manga(self, metadata: MangaMetadata, cover_image_path: str = "") -> int:
-        """Add or update manga metadata. Returns manga ID."""
+        """Add or update manga metadata. Returns the manga ID.
+
+        Existing rows are updated in place so the ID (and with it every chapter
+        row pointing at it) stays stable. Empty incoming values never overwrite
+        data we already have.
+        """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
-                
+
                 genres_json = json.dumps(metadata.genres) if metadata.genres else '[]'
                 alt_names_json = json.dumps(metadata.alternative_names) if metadata.alternative_names else '[]'
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO manga 
-                    (title, url, site_type, description, author, genres, status, 
-                     release_date, alternative_names, cover_image_url, cover_image_path,
-                     language, translation_type, first_download, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           COALESCE((SELECT first_download FROM manga WHERE title = ? AND language = ?), ?),
-                           ?)
-                ''', (
-                    metadata.title, metadata.url, metadata.site_type, metadata.description,
-                    metadata.author, genres_json, metadata.status, metadata.release_date,
-                    alt_names_json, metadata.cover_image_url, cover_image_path,
-                    metadata.language, metadata.translation_type, metadata.title, metadata.language,
-                    metadata.first_download, metadata.last_updated
-                ))
-                
-                manga_id = cursor.lastrowid
-                if manga_id is None:
-                    cursor.execute('SELECT id FROM manga WHERE title = ?', (metadata.title,))
-                    result = cursor.fetchone()
-                    manga_id = result[0] if result else 0
-                
+
+                cursor.execute('SELECT id FROM manga WHERE title = ? AND language = ?',
+                               (metadata.title, metadata.language))
+                row = cursor.fetchone()
+                if row is None:
+                    cursor.execute('SELECT id FROM manga WHERE url = ?', (metadata.url,))
+                    row = cursor.fetchone()
+
+                if row:
+                    manga_id = row[0]
+                    cursor.execute("""
+                        UPDATE manga SET
+                            title = ?, url = ?, site_type = ?,
+                            description = CASE WHEN ? != '' THEN ? ELSE description END,
+                            author = CASE WHEN ? != '' THEN ? ELSE author END,
+                            genres = CASE WHEN ? != '[]' THEN ? ELSE genres END,
+                            status = CASE WHEN ? NOT IN ('', 'unknown') THEN ? ELSE status END,
+                            release_date = CASE WHEN ? != '' THEN ? ELSE release_date END,
+                            alternative_names = CASE WHEN ? != '[]' THEN ? ELSE alternative_names END,
+                            cover_image_url = CASE WHEN ? != '' THEN ? ELSE cover_image_url END,
+                            cover_image_path = CASE WHEN ? != '' THEN ? ELSE cover_image_path END,
+                            translation_type = ?,
+                            last_updated = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    """, (
+                        metadata.title, metadata.url, metadata.site_type,
+                        metadata.description, metadata.description,
+                        metadata.author, metadata.author,
+                        genres_json, genres_json,
+                        metadata.status, metadata.status,
+                        metadata.release_date, metadata.release_date,
+                        alt_names_json, alt_names_json,
+                        metadata.cover_image_url, metadata.cover_image_url,
+                        cover_image_path, cover_image_path,
+                        metadata.translation_type,
+                        metadata.last_updated or datetime.now().isoformat(),
+                        manga_id,
+                    ))
+                else:
+                    now = datetime.now().isoformat()
+                    cursor.execute("""
+                        INSERT INTO manga
+                        (title, url, site_type, description, author, genres, status,
+                         release_date, alternative_names, cover_image_url, cover_image_path,
+                         language, translation_type, first_download, last_updated)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        metadata.title, metadata.url, metadata.site_type, metadata.description,
+                        metadata.author, genres_json, metadata.status, metadata.release_date,
+                        alt_names_json, metadata.cover_image_url, cover_image_path,
+                        metadata.language, metadata.translation_type,
+                        metadata.first_download or now, metadata.last_updated or now,
+                    ))
+                    manga_id = cursor.lastrowid
+
                 conn.commit()
-                return manga_id if manga_id is not None else 0
-                
+                return manga_id or 0
+
         except Exception as e:
             logging.error(f"Error adding/updating manga {metadata.title}: {e}")
             raise
-    
+
     def add_or_update_chapter(self, manga_id: int, chapter_data: ChapterData):
-        """Add or update chapter data."""
+        """Add or update a single chapter, keeping the row (and its ID) if it exists."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO chapters 
-                    (manga_id, chapter_number, chapter_name, chapter_url, language, volume_number, is_downloaded, download_date, file_path)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    manga_id, chapter_data.chapter_number, chapter_data.chapter_name,
-                    chapter_data.chapter_url, chapter_data.language, chapter_data.volume_number,
-                    chapter_data.is_downloaded, chapter_data.download_date, chapter_data.file_path
+                cursor.execute("""
+                    UPDATE chapters SET chapter_name = ?, chapter_url = ?, volume_number = ?,
+                                        is_downloaded = ?, download_date = ?, file_path = ?
+                    WHERE manga_id = ? AND chapter_number = ? AND language = ?
+                """, (
+                    chapter_data.chapter_name, chapter_data.chapter_url, chapter_data.volume_number,
+                    chapter_data.is_downloaded, chapter_data.download_date, chapter_data.file_path,
+                    manga_id, chapter_data.chapter_number, chapter_data.language,
                 ))
-                
+                if cursor.rowcount == 0:
+                    cursor.execute("""
+                        INSERT INTO chapters
+                        (manga_id, chapter_number, chapter_name, chapter_url, language, volume_number,
+                         is_downloaded, download_date, file_path)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        manga_id, chapter_data.chapter_number, chapter_data.chapter_name,
+                        chapter_data.chapter_url, chapter_data.language, chapter_data.volume_number,
+                        chapter_data.is_downloaded, chapter_data.download_date, chapter_data.file_path,
+                    ))
                 conn.commit()
-                
+
         except Exception as e:
             logging.error(f"Error adding/updating chapter {chapter_data.chapter_number}: {e}")
             raise
-    
+
+    def merge_chapters(self, manga_id: int, chapters: List[ChapterData], mark_new: bool = False) -> List[ChapterData]:
+        """Insert chapters that are not stored yet and refresh name/URL of known ones.
+
+        Download state of existing chapters is never touched. Returns the
+        chapters that were newly inserted.
+        """
+        inserted: List[ChapterData] = []
+        try:
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                for ch in chapters:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO chapters
+                        (manga_id, chapter_number, chapter_name, chapter_url, language, volume_number, is_new, free_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (manga_id, ch.chapter_number, ch.chapter_name, ch.chapter_url,
+                          ch.language, ch.volume_number, 1 if mark_new else 0, ch.free_at))
+                    if cursor.rowcount:
+                        inserted.append(ch)
+                    else:
+                        cursor.execute("""
+                            UPDATE chapters SET chapter_name = ?, chapter_url = ?, free_at = ?,
+                                   volume_number = CASE WHEN ? != '' THEN ? ELSE volume_number END
+                            WHERE manga_id = ? AND chapter_number = ? AND language = ?
+                        """, (ch.chapter_name, ch.chapter_url, ch.free_at, ch.volume_number, ch.volume_number,
+                              manga_id, ch.chapter_number, ch.language))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error merging chapters for manga ID {manga_id}: {e}")
+            raise
+        return inserted
+
+    def update_manga_description(self, manga_id: int, description: str) -> None:
+        try:
+            with self._connect() as conn:
+                conn.execute('UPDATE manga SET description = ? WHERE id = ?', (description, manga_id))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error updating description for manga ID {manga_id}: {e}")
+
+    def clear_new_flags(self, manga_id: int) -> None:
+        """Mark all chapters of a manga as seen."""
+        try:
+            with self._connect() as conn:
+                conn.execute('UPDATE chapters SET is_new = 0 WHERE manga_id = ? AND is_new = 1', (manga_id,))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error clearing new flags for manga ID {manga_id}: {e}")
+
+    def set_last_checked(self, manga_id: int, when: Optional[str] = None) -> None:
+        """Remember when a manga was last checked for new chapters."""
+        try:
+            with self._connect() as conn:
+                conn.execute('UPDATE manga SET last_checked = ? WHERE id = ?',
+                             (when or datetime.now().isoformat(), manga_id))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error setting last_checked for manga ID {manga_id}: {e}")
+
+    def merge_manga(self, keep_id: int, drop_id: int) -> None:
+        """Fold a duplicate manga entry into another one, keeping every download state.
+        Chapters only the duplicate knows are moved over; for shared chapters the
+        downloaded flag/file path is carried over when the kept entry lacks it."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute('''
+                    SELECT chapter_number, language, chapter_name, chapter_url, volume_number,
+                           is_downloaded, download_date, file_path
+                    FROM chapters WHERE manga_id = ?
+                ''', (drop_id,)).fetchall()
+                for number, language, name, url, volume, downloaded, date, path in rows:
+                    existing = conn.execute(
+                        'SELECT is_downloaded FROM chapters WHERE manga_id = ? AND chapter_number = ? AND language = ?',
+                        (keep_id, number, language)).fetchone()
+                    if existing is None:
+                        conn.execute('''
+                            INSERT INTO chapters (manga_id, chapter_number, chapter_name, chapter_url, language,
+                                                  volume_number, is_downloaded, download_date, file_path)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (keep_id, number, name, url, language, volume, downloaded, date, path))
+                    elif downloaded and not existing[0]:
+                        conn.execute('''
+                            UPDATE chapters SET is_downloaded = 1, download_date = ?, file_path = ?
+                            WHERE manga_id = ? AND chapter_number = ? AND language = ?
+                        ''', (date, path, keep_id, number, language))
+                conn.execute('DELETE FROM chapters WHERE manga_id = ?', (drop_id,))
+                conn.execute('DELETE FROM manga WHERE id = ?', (drop_id,))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error merging manga {drop_id} into {keep_id}: {e}")
+
+    def update_manga_url(self, manga_id: int, url: str, site_type: Optional[str] = None) -> None:
+        """Point a manga at a new source link (e.g. after the site moved domains)."""
+        try:
+            with self._connect() as conn:
+                if site_type:
+                    conn.execute('UPDATE manga SET url = ?, site_type = ? WHERE id = ?', (url, site_type, manga_id))
+                else:
+                    conn.execute('UPDATE manga SET url = ? WHERE id = ?', (url, manga_id))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error updating URL for manga ID {manga_id}: {e}")
+
+    def delete_manga_by_id(self, manga_id: int) -> None:
+        """Delete a manga and its chapters from the database (files stay on disk)."""
+        try:
+            with self._connect() as conn:
+                conn.execute('DELETE FROM chapters WHERE manga_id = ?', (manga_id,))
+                conn.execute('DELETE FROM manga WHERE id = ?', (manga_id,))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error deleting manga ID {manga_id}: {e}")
+
     def get_manga_list(self) -> List[Dict[str, Any]]:
         """Get list of all manga with basic info."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
                     SELECT m.id, m.title, m.url, m.site_type, m.description, m.author, m.genres,
                            m.status, m.cover_image_path, m.last_updated, m.first_download,
-                           COUNT(c.id) as total_chapters,
-                           COUNT(CASE WHEN c.is_downloaded = 1 THEN 1 END) as downloaded_chapters
+                           COUNT(DISTINCT c.chapter_number) as total_chapters,
+                           COUNT(DISTINCT CASE WHEN c.is_downloaded = 1 THEN c.chapter_number END) as downloaded_chapters,
+                           COUNT(DISTINCT CASE WHEN c.is_new = 1 AND c.is_downloaded = 0 THEN c.chapter_number END) as new_chapters,
+                           m.last_checked, m.language,
+                           MAX(c.created_at) as latest_chapter_at
                     FROM manga m
                     LEFT JOIN chapters c ON m.id = c.manga_id
                     GROUP BY m.id, m.title
@@ -396,7 +588,11 @@ class DatabaseManager:
                         'last_updated': row[9],
                         'first_download': row[10],
                         'total_chapters': row[11],
-                        'downloaded_chapters': row[12]
+                        'downloaded_chapters': row[12],
+                        'new_chapters': row[13],
+                        'last_checked': row[14] or '',
+                        'language': row[15] or 'en',
+                        'latest_chapter_at': row[16] or '',   # when the newest chapter was found
                     })
                 
                 return manga_list
@@ -408,7 +604,7 @@ class DatabaseManager:
     def get_manga_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Get manga data by title."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
@@ -446,7 +642,7 @@ class DatabaseManager:
     def get_manga_by_id(self, manga_id: int) -> Optional[Dict[str, Any]]:
         """Get manga data by ID."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
@@ -489,7 +685,7 @@ class DatabaseManager:
     def get_manga_by_url(self, url: str) -> Optional[Dict[str, Any]]:
         """Get manga data by URL."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
@@ -532,12 +728,12 @@ class DatabaseManager:
     def get_chapters_for_manga(self, manga_id: int, include_not_downloaded: bool = True, language: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all chapters for a manga, optionally filtered by language."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 query = '''
                     SELECT chapter_number, chapter_name, chapter_url, language, volume_number, is_downloaded, 
-                           download_date, file_path
+                           download_date, file_path, is_new, free_at
                     FROM chapters 
                     WHERE manga_id = ?
                 '''
@@ -565,7 +761,9 @@ class DatabaseManager:
                         'volume_number': row[4],
                         'is_downloaded': bool(row[5]),
                         'download_date': row[6],
-                        'file_path': row[7]
+                        'file_path': row[7],
+                        'is_new': bool(row[8]),
+                        'free_at': row[9] or '',
                     })
                 
                 return chapters
@@ -577,7 +775,7 @@ class DatabaseManager:
     def mark_chapter_downloaded(self, manga_id: int, chapter_number: str, file_path: str = "", language: Optional[str] = None):
         """Mark a chapter as downloaded, optionally scoped to a specific language."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 if language:
@@ -598,20 +796,27 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Error marking chapter {chapter_number} as downloaded: {e}")
     
-    def reset_chapter_download_status(self, manga_id: int, chapter_number: str):
-        """Reset a chapter's download status to allow redownloading."""
+    def reset_chapter_download_status(self, manga_id: int, chapter_number: str, language: Optional[str] = None):
+        """Reset a chapter's download status to allow redownloading, optionally scoped to a language."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
-                
-                cursor.execute('''
-                    UPDATE chapters 
-                    SET is_downloaded = 0, download_date = NULL, file_path = NULL
-                    WHERE manga_id = ? AND chapter_number = ?
-                ''', (manga_id, chapter_number))
+
+                if language:
+                    cursor.execute('''
+                        UPDATE chapters 
+                        SET is_downloaded = 0, download_date = NULL, file_path = NULL
+                        WHERE manga_id = ? AND chapter_number = ? AND language = ?
+                    ''', (manga_id, chapter_number, language))
+                else:
+                    cursor.execute('''
+                        UPDATE chapters 
+                        SET is_downloaded = 0, download_date = NULL, file_path = NULL
+                        WHERE manga_id = ? AND chapter_number = ?
+                    ''', (manga_id, chapter_number))
                 
                 conn.commit()
-                logging.info(f"Reset download status for chapter {chapter_number}")
+                logging.info(f"Reset download status for chapter {chapter_number}" + (f" [{language}]" if language else ""))
                 
         except Exception as e:
             logging.error(f"Error resetting chapter {chapter_number} download status: {e}")
@@ -619,7 +824,7 @@ class DatabaseManager:
     def update_cover_image_path(self, manga_id: int, cover_path: str):
         """Update the local cover image path for a manga."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
@@ -634,9 +839,10 @@ class DatabaseManager:
     def delete_manga(self, title: str):
         """Delete a manga and all its chapters."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
+                cursor.execute('DELETE FROM chapters WHERE manga_id IN (SELECT id FROM manga WHERE title = ?)', (title,))
                 cursor.execute('DELETE FROM manga WHERE title = ?', (title,))
                 conn.commit()
                 
@@ -646,7 +852,7 @@ class DatabaseManager:
     def search_manga(self, query: str) -> List[Dict[str, Any]]:
         """Search manga by title, author, or genre."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute('''

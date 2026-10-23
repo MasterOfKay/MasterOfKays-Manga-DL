@@ -7,7 +7,7 @@ A Python-based manga downloader that supports downloading from multiple manga si
 
 ## Currently Supported Sites
 
-- [AsuraScans](https://asuracomic.net)
+- [AsuraScans](https://asurascans.com/comics)
 - [MangaKatana](https://mangakatana.com)
 - [Webtoon](https://www.webtoons.com)
 - MangaDex
@@ -184,7 +184,7 @@ Your Selected Path/
 - Required packages (installed via requirements.txt):
   - requests
   - beautifulsoup4
-  - PyQt5 (for GUI version)
+  - PySide6 (Qt 6, for the GUI)
   - selenium (for certain sites)
 
 ## Building the Executable
@@ -221,11 +221,6 @@ This project is for educational purposes only. Use responsibly and respect copyr
 ## Upcoming Features
 
 The following features are planned for future updates:
-
-- 🌙 **Dark Mode** - A sleek dark theme for comfortable nighttime usage
-- 🔍 **Debugger Tool** - For easier problem identification and resolution
 - 📊 **Enhanced Download Statistics** - Track your manga collection growth
-- 🔄 **Auto-Update Checker** - Be notified when new versions are available
-- 🔔 **New Chapter Notifications** - Get alerts when new chapters are available for your favorite manga
 
 Have a feature suggestion? Feel free to open an issue or contribute to the project!

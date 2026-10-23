@@ -58,7 +58,11 @@ class WebtoonDownloader(ComicSiteBase):
             if title_elem:
                 metadata.title = title_elem.get_text(strip=True)
             
-            cover_img = (soup.select_one('.detail_header .thmb img') or 
+            # og:image is the portrait poster (same art as on webtoons.com lists); without
+            # the "?type=" size suffix it comes in full resolution.
+            poster = soup.select_one('meta[property="og:image"]')
+            poster_url = (poster.get('content') or '').split('?')[0] if poster else ''
+            cover_img = None if poster_url else (soup.select_one('.detail_header .thmb img') or 
                         soup.select_one('.detail_body .thmb img') or 
                         soup.select_one('.info .pic img') or
                         soup.select_one('img[alt*="thumbnail"]'))
@@ -69,6 +73,8 @@ class WebtoonDownloader(ComicSiteBase):
                     if 'type=f' in src:
                         src = src.replace('type=f160_151', 'type=crop600_600')
                     metadata.cover_image_url = src
+            if poster_url:
+                metadata.cover_image_url = poster_url
             
             desc_elem = soup.select_one('.summary') or soup.select_one('.detail_summary') or soup.select_one('.description')
             if desc_elem:

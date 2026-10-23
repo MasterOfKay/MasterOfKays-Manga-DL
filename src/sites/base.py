@@ -12,6 +12,28 @@ import json
 from urllib.parse import urljoin, urlparse
 
 
+_C1 = re.compile('[\x80-\x9f]')
+
+
+def fix_text(text: str) -> str:
+    """Repair Windows-1252 punctuation that some sites store as control characters
+    (e.g. MangaKatana's "doesn\\x92t" -> "doesn’t")."""
+    if not text or not _C1.search(text):
+        return text or ''
+
+    def repl(match):
+        try:
+            return bytes([ord(match.group(0))]).decode('cp1252')
+        except UnicodeDecodeError:
+            return ''
+    return _C1.sub(repl, text)
+
+
+class ChapterUnavailable(Exception):
+    """The chapter can't be downloaded right now (locked, premium, removed).
+    Retrying immediately won't help, so the download queue gives up on it at once."""
+
+
 class ChapterInfo:
     """Enhanced chapter information structure for complex sites like MangaDex."""
     def __init__(self):

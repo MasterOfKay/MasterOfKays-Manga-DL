@@ -297,7 +297,7 @@ class MangaDexDownloader(ComicSiteBase):
                 elif rel_type == 'cover_art':
                     cover_filename = rel_attrs.get('fileName')
                     if cover_filename:
-                        metadata.cover_image_url = f"https://uploads.mangadex.org/covers/{manga_id}/{cover_filename}.512.jpg"
+                        metadata.cover_image_url = f"https://uploads.mangadex.org/covers/{manga_id}/{cover_filename}"   # original, not the 512px thumbnail
             
             return metadata
             
