@@ -1,0 +1,85 @@
+# Builds the Windows .exe and the Linux app whenever a release is published on
+# GitHub
+
+name: Build release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:          # "Run workflow" button on the Actions tab
+    inputs:
+      tag:
+        description: 'Existing release tag to build and attach the files to (e.g. V3.0). Empty = test build only.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write             # upload files to the release
+
+env:
+  # The release this run builds: the published one, or the tag typed in "Run workflow".
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            built: dist/MangaDL.exe
+            asset: MangaDL-windows.exe
+          - os: ubuntu-22.04      # older glibc = runs on more Linux distros
+            built: dist/MangaDL
+            asset: MangaDL-linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}     # build exactly the released code
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Use the tag as app version
+        if: env.TAG != ''
+        shell: bash
+        run: |
+          python - "$TAG" <<'EOF'
+          import pathlib, re, sys
+          version = sys.argv[1].lstrip('vV')
+          init = pathlib.Path('src/__init__.py')
+          init.write_text(re.sub(r'__version__ = "[^"]*"', f'__version__ = "{version}"', init.read_text()))
+          print('version', version)
+          EOF
+
+      - name: Build
+        shell: bash
+        run: >
+          python -m PyInstaller --noconfirm --onefile --windowed --name MangaDL
+          --icon Logo.ico --add-data "Logo.png:." --add-data "Logo.ico:."
+          main.py
+
+      - name: Rename
+        shell: bash
+        run: mv "${{ matrix.built }}" "dist/${{ matrix.asset }}"
+
+      - name: Keep as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+      - name: Attach to the release
+        if: env.TAG != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/${{ matrix.asset }}

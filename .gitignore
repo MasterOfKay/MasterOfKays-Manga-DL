@@ -50,8 +50,18 @@ env/
 !src/
 !src/**/
 !.github/
+# [A-Z]*/ also matches lowercase folders on Windows (e.g. .github/workflows/)
+!.github/**/
 !tests/
 !docs/
 !examples/
 !*/.*
 !*/__pycache__
+
+# Local debug
+MANGADX_IMPLEMENTATION.md
+chapter_selection_backup.py
+check_mangadex.py
+debug_mangadx.py
+temp_clean.py
+test_refresh_mangadx.py
