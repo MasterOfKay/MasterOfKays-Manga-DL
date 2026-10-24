@@ -12,10 +12,14 @@ import io
 import zipfile
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from requests.adapters import HTTPAdapter
 
 from .base import ComicSiteBase, StorageUnavailable, save_file
 
 logger = logging.getLogger(__name__)
+PARALLEL_IMAGES = 8
 
 
 class MangaKatanaDownloader(ComicSiteBase):
@@ -23,6 +27,17 @@ class MangaKatanaDownloader(ComicSiteBase):
     
     def __init__(self):
         super().__init__("MangaKatana", "https://mangakatana.com")
+        # One session for all chapters: kept-alive connections instead of a new TLS
+        # handshake per chapter, sized for the parallel page downloads.
+        self._session = requests.Session()
+        self._session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive',
+            'Referer': 'https://mangakatana.com/',
+        })
+        self._session.mount('https://', HTTPAdapter(pool_connections=4, pool_maxsize=PARALLEL_IMAGES * 2))
     
     @classmethod
     def validate_url(cls, url: str) -> bool:
@@ -259,15 +274,7 @@ class MangaKatanaDownloader(ComicSiteBase):
             
             logger.info(f"Starting download of {manga_name} chapter {chapter_num}")
         
-            session = requests.Session()
-            session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Connection': 'keep-alive',
-                'Cache-Control': 'max-age=0',
-                'Referer': 'https://mangakatana.com/',
-            })
+            session = self._session
 
             max_retries = 3
             response = None
@@ -375,32 +382,30 @@ class MangaKatanaDownloader(ComicSiteBase):
             except Exception as sort_error:
                 logger.warning(f"Could not sort image URLs naturally: {sort_error}")
             
-            successful_downloads = 0
             total_images = len(image_urls)
             if progress_callback:
                 progress_callback(0, total_images)
+            pages: List[Optional[bytes]] = [None] * total_images
+            done = 0
+            with ThreadPoolExecutor(max_workers=PARALLEL_IMAGES) as pool:
+                futures = {pool.submit(self._fetch_image, url, idx): idx
+                           for idx, url in enumerate(image_urls, 1)}
+                for future in as_completed(futures):
+                    # raises -> the chapter fails (and is retried) instead of being saved with pages missing
+                    pages[futures[future] - 1] = future.result()
+                    done += 1
+                    if progress_callback:
+                        progress_callback(done, total_images)
+
+            successful_downloads = 0
             buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, 'w') as cbz:
-                for idx, img_url in enumerate(image_urls, 1):
-                    for img_attempt in range(3):
-                        try:
-                            img_response = session.get(img_url, timeout=15)
-                            img_response.raise_for_status()
-                        except Exception as e:
-                            if img_attempt == 2:
-                                # Fail the chapter (it is retried) instead of saving it with pages missing.
-                                raise RuntimeError(f"Image {idx} failed to download: {e}") from e
-                            logger.warning(f"Error downloading image {idx}, attempt {img_attempt+1}: {e}")
-                            time.sleep(2)
-                            continue
-                        if len(img_response.content) < 1000:  # Skip very small images
-                            logger.warning(f"Image {idx} too small ({len(img_response.content)} bytes), skipping")
-                        else:
-                            cbz.writestr(f"{idx:03d}.jpg", img_response.content)
-                            successful_downloads += 1
-                        if progress_callback:
-                            progress_callback(idx, total_images)
-                        break
+            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_STORED) as cbz:    # images are already compressed
+                for idx, content in enumerate(pages, 1):
+                    if len(content) < 1000:  # Skip very small images
+                        logger.warning(f"Image {idx} too small ({len(content)} bytes), skipping")
+                        continue
+                    cbz.writestr(f"{idx:03d}.jpg", content)
+                    successful_downloads += 1
 
             if successful_downloads == 0:
                 logger.error("No images were successfully downloaded")
@@ -415,6 +420,18 @@ class MangaKatanaDownloader(ComicSiteBase):
         except Exception as e:
             logger.exception(f"Error downloading chapter {chapter_num}: {e}")
             return {"path": "", "url": chapter_url, "success": False, "error": str(e)}
+
+    def _fetch_image(self, url: str, idx: int) -> bytes:
+        for attempt in range(3):
+            try:
+                response = self._session.get(url, timeout=15)
+                response.raise_for_status()
+                return response.content
+            except Exception as e:
+                if attempt == 2:
+                    raise RuntimeError(f"Image {idx} failed to download: {e}") from e
+                logger.warning(f"Error downloading image {idx}, attempt {attempt+1}: {e}")
+                time.sleep(2)
 
     def check_for_updates(self, manga_url: str, current_chapters: List[str]) -> List[Tuple[str, str, str]]:
         """Check if there are new chapters available."""

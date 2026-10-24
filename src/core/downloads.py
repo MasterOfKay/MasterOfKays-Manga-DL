@@ -103,6 +103,10 @@ class Job:
         return min(100.0, (handled + partial) * 100 / self.total)
 
 
+# Chapters after the current one that sites with slow page servers may start loading.
+READ_AHEAD = 3
+
+
 class DownloadManager:
     def __init__(self, library: Library, settings, bus: EventBus):
         self.library = library
@@ -462,9 +466,15 @@ class DownloadManager:
                     job.status = JOB_PAUSED
                     return
                 # Chapters can be added while the job runs
-                ref = next((c for c in job.chapters if job.states.get(c.key) == QUEUED), None)
-            if ref is None or job.cancelled or self._stopping:
+                waiting = [c for c in job.chapters if job.states.get(c.key) == QUEUED][:1 + READ_AHEAD]
+            if not waiting or job.cancelled or self._stopping:
                 break
+            ref = waiting[0]
+            for after in waiting[1:]:
+                try:
+                    site.prefetch(after.url)
+                except Exception as e:
+                    logging.debug(f"Read-ahead of {job.title} chapter {after.number} failed: {e}")
             problem = storage_problem(root)
             if problem:
                 self._block(job, problem)

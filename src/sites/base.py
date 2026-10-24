@@ -157,7 +157,11 @@ class ComicSiteBase(ABC):
         Returns path to CBZ file or result dictionary.
         """
         pass
-    
+
+    def prefetch(self, chapter_url: str) -> None:
+        """Optional: start loading the chapter the queue downloads next, while the current
+        one is still running. Must return at once; sites with slow page servers use it."""
+
     def get_chapter_filename(self, manga_name: str, chapter_num: str, language: str = "en") -> str:
         """Generate chapter filename with language support."""
         safe_manga_name = self.sanitize_filename(manga_name)
