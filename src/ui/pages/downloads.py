@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLineEdit, QProgressBar
 from ...core import AppCore
 from ...core.downloads import (JOB_CANCELLED, JOB_DONE, JOB_FAILED, JOB_PAUSED, JOB_QUEUED, JOB_RUNNING,
                                STORAGE_OFFLINE, Job)
-from ...core.models import site_label
+from ...core.models import is_novel_url, site_label
 from .. import icons, theme
 from ..bridge import Bridge
 from ..tasks import run_async
@@ -127,7 +127,8 @@ class JobRow(Card):
             text = job.error or 'Failed'
         if failed and job.status not in (JOB_FAILED,):
             text += f" · {failed} failed"
-        self.status.setText(f"{site_label(job.site_type)}  ·  {text}")
+        kind = '  ·  Light novel' if is_novel_url(job.url) else ''
+        self.status.setText(f"{site_label(job.site_type)}{kind}  ·  {text}")
         role = 'error' if job.blocked else 'muted'
         if self.status.property('role') != role:
             self.status.setProperty('role', role)
@@ -139,7 +140,7 @@ class JobRow(Card):
             if current and job.status == JOB_RUNNING:
                 ch_progress = job.progress.get(current.key, 0)
                 name = current.display_name
-                self.chapter_line.setText(f"Current: Chapter {current.number}" + (f" — {name}" if name else '')
+                self.chapter_line.setText(f"Current: Chapter {current.number}" + (f" - {name}" if name else '')
                                           + f"  ·  {ch_progress}%")
             else:
                 self.chapter_line.setText('')
@@ -400,6 +401,27 @@ class DownloadsPage(QWidget):
         job = next((j for j in self.core.downloads.jobs() if j.id == job_id), None)
         if job:
             row.update_from(job)
+
+
+def change_novel_folder(parent: QWidget, core: AppCore, reset: bool = False) -> Optional[str]:
+    """Separate folder for light novels ('' = the normal download folder). Returns the folder in use."""
+    if reset:
+        path = ''
+    else:
+        current = core.library.download_root(novel=True)
+        path = QFileDialog.getExistingDirectory(parent, 'Choose the folder for light novels',
+                                                current if os.path.isdir(current) else '')
+        if not path:
+            return None
+        os.makedirs(path, exist_ok=True)
+    core.settings.set('novels.download_path', path)
+
+    def resync():
+        core.library.sync_all()
+        return True
+
+    run_async(resync, lambda _ok: core.bus.emit('library_changed', 0))
+    return core.library.download_root(novel=True)
 
 
 def change_download_folder(parent: QWidget, core: AppCore) -> Optional[str]:

@@ -32,6 +32,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         'reading_direction': 'ltr',  # ltr | rtl (ComicInfo Manga=YesAndRightToLeft)
         'publisher_from_site': True, # source site as <Publisher> (handy for filtering in Komga)
     },
+    'novels': {
+        'format': 'epub',           # epub | pdf | docx | html | md | txt (core.models.NOVEL_FORMATS)
+        'download_path': '',        # own folder for light novels; '' = the normal download folder
+    },
     'notifications': {
         'in_app': True,             # toasts inside the window
         'desktop': True,            # system notifications while the window is in the background

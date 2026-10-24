@@ -15,7 +15,7 @@ from ...core.paths import data_dir
 from .. import theme
 from ..widgets import Button, Card, ElidedLabel, IconButton, Segmented, Toggle, divider, label
 from ..tasks import run_async
-from .downloads import change_download_folder
+from .downloads import change_download_folder, change_novel_folder
 
 INTERVALS = [(15, '15 minutes'), (30, '30 minutes'), (60, '1 hour'), (180, '3 hours'),
              (360, '6 hours'), (720, '12 hours'), (1440, 'Once a day')]
@@ -96,6 +96,39 @@ class SettingsPage(QWidget):
         retries.valueChanged.connect(lambda v: self._set('download.retry_attempts', v))
         self._row(box, card, 'Retries per chapter', 'How often a failed chapter is retried before giving up.', retries,
                   last=True)
+
+        # --------------------------------------------------------- novels
+        from ...core.models import NOVEL_FORMATS
+        card, box = self._section(body, col, 'Light novels')
+        novel_format = QComboBox(card)
+        for key, (name, ext) in NOVEL_FORMATS.items():
+            novel_format.addItem(f"{name}  ({ext})", key)
+        current = self.s.get('novels.format', 'epub')
+        novel_format.setCurrentIndex(max(0, list(NOVEL_FORMATS).index(current) if current in NOVEL_FORMATS else 0))
+        novel_format.currentIndexChanged.connect(
+            lambda i: self._set('novels.format', novel_format.itemData(i)))
+        self._row(box, card, 'Save chapters as',
+                  'Novels have text chapters instead of pages. EPUB works in Komga, Kavita and every e-reader; '
+                  'PDF, Word, HTML, Markdown and text are there for other apps. Applies to new downloads.',
+                  novel_format)
+        novel_folder = QWidget(card)
+        nl = QHBoxLayout(novel_folder)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(6)
+        self.novel_folder_label = ElidedLabel('', novel_folder)
+        self.novel_folder_label.setProperty('role', 'muted')
+        self.novel_folder_label.setMinimumWidth(200)
+        nl.addWidget(self.novel_folder_label, 1)
+        novel_change = Button('Change…', 'folder', None, novel_folder)
+        novel_change.clicked.connect(lambda: self._change_novel_folder(False))
+        nl.addWidget(novel_change)
+        self.novel_reset = Button('Use download folder', None, 'ghost', novel_folder)
+        self.novel_reset.clicked.connect(lambda: self._change_novel_folder(True))
+        nl.addWidget(self.novel_reset)
+        self._row(box, card, 'Novels folder',
+                  'Light novels can go to their own library folder (e.g. a Komga "Books" library). '
+                  'Each novel still gets its own sub-folder.', novel_folder, last=True, wide=True)
+        self._show_novel_folder()
 
         # ------------------------------------------------- media servers
         card, box = self._section(body, col, 'Metadata for Komga, Kavita & Jellyfin')
@@ -305,6 +338,19 @@ class SettingsPage(QWidget):
             self.folder_label.setText(self.core.library.download_root())
             self.toast.emit('Download folder changed', self.core.library.download_root(), 'success')
 
+    def _show_novel_folder(self):
+        own = bool((self.s.get('novels.download_path') or '').strip())
+        self.novel_folder_label.setText(self.core.library.download_root(novel=True) if own
+                                        else 'Same as the download folder')
+        self.novel_reset.setVisible(own)
+
+    def _change_novel_folder(self, reset):
+        path = change_novel_folder(self, self.core, reset)
+        if path is not None:
+            self._show_novel_folder()
+            self.toast.emit('Novels folder changed', path, 'success')
+
     def showEvent(self, event):   # noqa: N802
         self.folder_label.setText(self.core.library.download_root())
+        self._show_novel_folder()
         super().showEvent(event)

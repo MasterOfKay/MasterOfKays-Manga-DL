@@ -86,9 +86,15 @@ class BrowseCard(QFrame):
         self.sub = ElidedLabel(item.latest or (item.status.title() if item.status else ''), self)
         self.sub.setProperty('role', 'faint')
         layout.addWidget(self.sub)
-        if in_library:
-            pill = Pill('In library', 'success', self)
-            layout.addWidget(pill)
+        if item.is_novel or in_library:
+            pills = QHBoxLayout()
+            pills.setSpacing(4)
+            if item.is_novel:
+                pills.addWidget(Pill('Light novel', 'info', self))
+            if in_library:
+                pills.addWidget(Pill('In library', 'success', self))
+            pills.addStretch(1)
+            layout.addLayout(pills)
         layout.addStretch(1)
         thumbs.request(item, lambda path: self.cover.set_cover(path, item.title) if path else None)
 

@@ -163,6 +163,7 @@ QLabel[pill="true"][tone="accent"] {{ background: {t['accent_soft']}; color: {t[
 QLabel[pill="true"][tone="success"] {{ background: {t['success_soft']}; color: {t['success']}; }}
 QLabel[pill="true"][tone="warning"] {{ background: {t['warning_soft']}; color: {t['warning']}; }}
 QLabel[pill="true"][tone="danger"] {{ background: {t['danger_soft']}; color: {t['danger']}; }}
+QLabel[pill="true"][tone="info"] {{ background: {t['info_soft']}; color: {t['info']}; }}
 QLabel[pill="true"][tone="neutral"] {{ background: {t['surface_alt']}; color: {t['text_muted']};
                                       border: 1px solid {t['border']}; }}
 QLabel#NavBadge {{ background: {t['accent']}; color: {t['on_accent']}; border-radius: 9px;

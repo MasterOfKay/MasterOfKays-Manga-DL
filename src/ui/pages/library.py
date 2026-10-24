@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLineEdit, QMenu, QMessag
 
 from ...core import AppCore
 from ...core.downloads import JOB_PAUSED, JOB_QUEUED, JOB_RUNNING
-from ...core.models import site_label
+from ...core.models import is_novel_url, site_label
 from .. import icons, theme
 from ..bridge import Bridge
 from ..widgets import (Button, Card, Cover, ElidedLabel, EmptyState, IconButton, Pill, Segmented, label, restyle)
@@ -111,6 +111,8 @@ class MangaCard(Card):
         self.title.setText(title)
         self.cover.set_cover(data.get('cover_image_path') or '', title)
         parts = [site_label(data.get('site_type', ''))]
+        if is_novel_url(data.get('url', '')):
+            parts.append('Light novel')
         author = (data.get('author') or '').strip()
         if any(ch.isalnum() for ch in author):
             parts.append(author)
@@ -180,8 +182,10 @@ class MangaCard(Card):
         menu.exec(self.more_btn.mapToGlobal(self.more_btn.rect().bottomLeft()))
 
     def _open_folder(self) -> None:
-        folder = self.core.library.manga_folder(self.data.get('title', ''))
-        QDesktopServices.openUrl(QUrl.fromLocalFile(folder if os.path.isdir(folder) else self.core.library.download_root()))
+        folder = self.core.library.folder_of(self.data)
+        novel = is_novel_url(self.data.get('url', ''))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder if os.path.isdir(folder)
+                                                    else self.core.library.download_root(novel)))
 
     def _remove(self) -> None:
         answer = QMessageBox.question(

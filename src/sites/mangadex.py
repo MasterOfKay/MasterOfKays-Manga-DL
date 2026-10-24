@@ -191,12 +191,12 @@ class MangaDexDownloader(ComicSiteBase):
     @classmethod
     def validate_url(cls, url: str) -> bool:
         """Check if URL is valid for MangaDex."""
-        pattern = r'^https?://mangadex\.org/title/[a-f0-9\-]+/[^/]+.*$'
+        pattern = r'^https?://mangadex\.org/title/[a-f0-9\-]{36}(?:[/?#].*)?$'      # the slug is optional
         return bool(re.match(pattern, url))
     
     def extract_manga_id(self, url: str) -> str:
         """Extract manga ID from MangaDex URL."""
-        match = re.search(r'/title/([a-f0-9\-]+)/', url)
+        match = re.search(r'/title/([a-f0-9\-]{36})', url)
         if match:
             return match.group(1)
         raise ValueError("Invalid MangaDex URL format")
@@ -315,7 +315,8 @@ class MangaDexDownloader(ComicSiteBase):
             params = {
                 'manga': manga_id,
                 'limit': 100,
-                'offset': 0
+                'offset': 0,
+                'includes[]': ['scanlation_group'],     # group names, for the release group filter
             }
             
             if language_filter:

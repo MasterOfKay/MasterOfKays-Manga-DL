@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLineEdit, QListV
 
 from ..core import AppCore
 from ..core.downloads import CANCELLED, DONE, DOWNLOADING, FAILED, QUEUED
-from ..core.models import ChapterKey, ChapterRef, FetchedManga, chapter_sort_key, language_name, site_label
+from ..core.models import (ChapterKey, ChapterRef, FetchedManga, chapter_sort_key, is_novel_url, language_name,
+                           pick_source, site_label)
 from . import icons, theme
 from .bridge import Bridge
 from .tasks import run_async
@@ -174,6 +175,11 @@ class ChapterModel(QAbstractListModel):
         if role == Qt.ToolTipRole and self.state_of(ref) == FAILED:
             reason = self.errors.get(ref.key) or 'Download failed'
             return f"{reason}\n\nClick Retry to try again."
+        if role == Qt.ToolTipRole and len(ref.sources) > 1:
+            how = 'picked by you' if ref.group_locked else 'from the group filter'
+            others = ', '.join(s.group for s in ref.sources if s.group != ref.group)
+            return (f"Release group: {ref.group} ({how})\nAlso available from: {others}\n\n"
+                    "Click the group to download this chapter from another one.")
         if role == Qt.ToolTipRole and self.state_of(ref) == EARLY:
             return (f"Early access on the site - {ref.free_label.lower()}.\n"
                     "It can't be downloaded before that.")
@@ -188,6 +194,7 @@ class ChapterDelegate(QStyledItemDelegate):
     def __init__(self, model: ChapterModel, parent=None):
         super().__init__(parent)
         self.model = model
+        self.chips: Dict[ChapterKey, tuple] = {}     # x-range of the release group chip per chapter
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(option.rect.width(), ROW_HEIGHT)
@@ -272,6 +279,35 @@ class ChapterDelegate(QStyledItemDelegate):
             p.drawText(pill, Qt.AlignCenter, pill_text)
             right = pill.left() - 10
 
+        # release group chip - only when several groups uploaded this chapter
+        if len(ref.sources) > 1:
+            chip_font = QFont(option.font)
+            chip_font.setPointSizeF(chip_font.pointSizeF() * 0.86)
+            cfm = QFontMetrics(chip_font)
+            chip_text = cfm.elidedText(ref.group or 'Group', Qt.ElideRight, 120)
+            chip_w = cfm.horizontalAdvance(chip_text) + 30
+            chip = QRectF(right - chip_w, rect.center().y() - 10, chip_w, 20)
+            locked = ref.group_locked
+            p.setPen(QPen(QColor(t['accent'] if locked else t['border_strong']), 1))
+            p.setBrush(QColor(t['accent_soft'] if locked else t['surface']))
+            p.drawRoundedRect(chip, 10, 10)
+            color = QColor(t['accent_text'] if locked else t['text_muted'])
+            p.setFont(chip_font)
+            p.setPen(color)
+            p.drawText(chip.adjusted(10, 0, -18, 0), Qt.AlignLeft | Qt.AlignVCenter, chip_text)
+            chevron = QPainterPath()
+            cx, cy = chip.right() - 12, chip.center().y()
+            chevron.moveTo(cx - 3, cy - 1.5)
+            chevron.lineTo(cx, cy + 1.5)
+            chevron.lineTo(cx + 3, cy - 1.5)
+            p.setPen(QPen(color, 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(chevron)
+            self.chips[ref.key] = (chip.left(), chip.right())
+            right = chip.left() - 10
+        else:
+            self.chips.pop(ref.key, None)
+
         # texts
         text_left = int(box.right()) + 12
         text_rect = QRect(text_left, rect.top(), max(10, int(right) - text_left), rect.height())
@@ -281,7 +317,7 @@ class ChapterDelegate(QStyledItemDelegate):
         if ref.volume:
             title += f"  ·  Vol. {ref.volume}"
         subtitle = ref.display_name
-        if ref.group:
+        if ref.group and len(ref.sources) < 2:      # several groups: shown in the chip
             subtitle = f"{subtitle}  ·  {ref.group}" if subtitle else ref.group
 
         p.setFont(title_font)
@@ -322,11 +358,13 @@ class ChapterList(QListView):
     """List with click-to-toggle and shift-click range selection."""
     open_requested = Signal(object)
     redownload_requested = Signal(object)
+    group_requested = Signal(object, QPoint)      # ref, global position for the menu
 
     def __init__(self, model: ChapterModel, parent=None):
         super().__init__(parent)
         self.setModel(model)
-        self.setItemDelegate(ChapterDelegate(model, self))
+        self._delegate = ChapterDelegate(model, self)
+        self.setItemDelegate(self._delegate)
         self.setSelectionMode(QListView.NoSelection)
         self.setMouseTracking(True)
         self.setUniformItemSizes(True)
@@ -349,6 +387,11 @@ class ChapterList(QListView):
             if (self._model.state_of(ref) == FAILED
                     and event.position().x() > self.viewport().width() - self.RETRY_HIT_WIDTH):
                 self.redownload_requested.emit(ref)
+                return
+            chip = self._delegate.chips.get(ref.key)
+            if chip and len(ref.sources) > 1 and chip[0] <= event.position().x() <= chip[1]:
+                rect = self.visualRect(index)
+                self.group_requested.emit(ref, self.viewport().mapToGlobal(QPoint(int(chip[0]), rect.bottom())))
                 return
             if event.modifiers() & Qt.ShiftModifier and self._anchor is not None:
                 self._model.set_range(self._anchor, row, self._anchor_value)
@@ -378,6 +421,10 @@ class ChapterList(QListView):
         if ref.downloaded:
             menu.addAction(icons.icon('folder', t['text_muted']), "Show in folder", lambda: self.open_requested.emit(ref))
             menu.addAction(icons.icon('retry', t['text_muted']), "Download again", lambda: self.redownload_requested.emit(ref))
+            menu.addSeparator()
+        if len(ref.sources) > 1:
+            menu.addAction(icons.icon('stack', t['text_muted']), f"Release group: {ref.group}…",
+                           lambda: self.group_requested.emit(ref, self.viewport().mapToGlobal(pos)))
             menu.addSeparator()
         menu.addAction("Select this and all above", lambda: self._model.set_range(0, row, True))
         menu.addAction("Select this and all below", lambda: self._model.set_range(row, self._model.rowCount() - 1, True))
@@ -432,7 +479,10 @@ class ChapterPanel(QFrame):
         badges.setSpacing(6)
         self.site_pill = Pill('', 'neutral', header)
         self.status_pill = Pill('', 'neutral', header)
+        self.novel_pill = Pill('Light novel', 'info', header)
+        self.novel_pill.setToolTip('Text chapters - saved in the novel format chosen in Settings (EPUB by default)')
         badges.addWidget(self.site_pill)
+        badges.addWidget(self.novel_pill)
         badges.addWidget(self.status_pill)
         badges.addStretch(1)
         info.addLayout(badges)
@@ -505,6 +555,13 @@ class ChapterPanel(QFrame):
         self.language.setMinimumWidth(150)
         self.language.currentIndexChanged.connect(self._language_changed)
         row2.addWidget(self.language)
+        self.group_filter = QComboBox(controls)
+        self.group_filter.setMinimumWidth(150)
+        self.group_filter.setToolTip('Release group to download from. Chapters this group didn\'t release '
+                                     'use the first available group.\nClick the group on a chapter to change '
+                                     'just that one.')
+        self.group_filter.currentIndexChanged.connect(self._group_filter_changed)
+        row2.addWidget(self.group_filter)
         self.search = QLineEdit(controls)
         self.search.setPlaceholderText('Find chapter…')
         self.search.setClearButtonEnabled(True)
@@ -545,6 +602,7 @@ class ChapterPanel(QFrame):
         self.list = ChapterList(self.model, self)
         self.list.open_requested.connect(self._show_file)
         self.list.redownload_requested.connect(lambda ref: self._download([ref]))
+        self.list.group_requested.connect(self._group_menu)
         root.addWidget(self.list, 1)
 
         self.empty = label('No chapters match this filter.', 'faint', self)
@@ -586,6 +644,7 @@ class ChapterPanel(QFrame):
         self.model.clear_selection()
         self._fill_header(manga['title'], manga.get('site_type', ''), manga.get('status', ''),
                           manga.get('author', ''), manga.get('description', ''), manga.get('cover_image_path', ''))
+        self.novel_pill.setVisible(is_novel_url(manga.get('url', '')))
         self._load_chapters(self.core.library.chapters(manga_id), keep_language=False)
         self._on_check_state(manga_id, self.core.updates.is_checking(manga_id))
         self._set_mode()
@@ -602,6 +661,7 @@ class ChapterPanel(QFrame):
         meta = fetched.metadata
         self._fill_header(fetched.title, fetched.site_type, getattr(meta, 'status', ''),
                           getattr(meta, 'author', ''), getattr(meta, 'description', ''), fetched.cover_path)
+        self.novel_pill.setVisible(fetched.is_novel)
         refs = [ChapterRef(**{**r.__dict__}) for refs in fetched.chapters.values() for r in refs]
         self._load_chapters(refs, keep_language=False)
         self._set_mode()
@@ -671,6 +731,7 @@ class ChapterPanel(QFrame):
             self.model.errors = {key: self.core.downloads.chapter_error(self.manga_id, key)
                                  for key, (state, _p) in self.model.live.items() if state == FAILED}
         self.model.set_chapters(by_language.get(self._language, []))
+        self._fill_groups()
         self._update_stats()
 
     @staticmethod
@@ -691,7 +752,84 @@ class ChapterPanel(QFrame):
             self._language = lang
             self.model.clear_selection()
             self.model.set_chapters(self._by_language.get(lang, []))
+            self._fill_groups()
             self._update_stats()
+
+    # ------------------------------------------------------ release groups
+    def _preferred_group(self) -> str:
+        if self.fetched is not None:
+            return self.fetched.preferred_group
+        return (self.core.library.get_manga(self.manga_id) or {}).get('preferred_group', '') if self.manga_id else ''
+
+    def _fill_groups(self) -> None:
+        """Groups of the shown language, the one with the most chapters first."""
+        counts: Dict[str, int] = {}
+        for ref in self.model.chapters():
+            for group in ([s.group for s in ref.sources] or ([ref.group] if ref.group else [])):
+                counts[group] = counts.get(group, 0) + 1
+        preferred = self._preferred_group()
+        self.group_filter.blockSignals(True)
+        self.group_filter.clear()
+        self.group_filter.addItem('Any release group', '')
+        for group in sorted(counts, key=lambda g: (-counts[g], g.lower())):
+            self.group_filter.addItem(f"{group}  ({counts[group]})", group)
+        if preferred and preferred not in counts:
+            self.group_filter.addItem(f"{preferred}  (0)", preferred)
+        index = self.group_filter.findData(preferred)
+        self.group_filter.setCurrentIndex(max(0, index))
+        self.group_filter.blockSignals(False)
+        self.group_filter.setVisible(len(counts) > 1)
+
+    def _group_filter_changed(self, index: int) -> None:
+        group = self.group_filter.itemData(index) or ''
+        if self.fetched is not None:
+            self.fetched.preferred_group = group
+            for ref in self._preview_refs():
+                if ref.sources and not ref.group_locked:
+                    ref.use_source(pick_source(ref.sources, group))
+            self.list.viewport().update()
+        elif self.manga_id is not None:
+            self.core.library.set_preferred_group(self.manga_id, group)
+        missing = sum(1 for r in self.model.chapters() if r.sources and group
+                      and all(s.group != group for s in r.sources) and not r.downloaded)
+        if group and missing:
+            self.toast.emit('Release group', f"{missing} chapters aren't released by {group} - "
+                            "they use the first available group.", 'info')
+
+    def _preview_refs(self) -> List[ChapterRef]:
+        """The panel's chapters and the fetched result they were copied from (stored on save)."""
+        return [r for refs in self._by_language.values() for r in refs] + \
+               [r for refs in self.fetched.chapters.values() for r in refs]
+
+    def _group_menu(self, ref: ChapterRef, pos: QPoint) -> None:
+        menu = QMenu(self)
+        auto = menu.addAction('Use the group filter')
+        auto.setCheckable(True)
+        auto.setChecked(not ref.group_locked)
+        auto.triggered.connect(lambda: self._set_chapter_group(ref, ''))
+        menu.addSeparator()
+        for source in ref.sources:
+            action = menu.addAction(source.group)
+            action.setCheckable(True)
+            action.setChecked(source.group == ref.group)
+            action.triggered.connect(lambda _=False, g=source.group: self._set_chapter_group(ref, g))
+        menu.exec(pos)
+
+    def _set_chapter_group(self, ref: ChapterRef, group: str) -> None:
+        if self.fetched is not None:
+            source = next((s for s in ref.sources if s.group == group), None) if group else None
+            locked = source is not None
+            source = source or pick_source(ref.sources, self.fetched.preferred_group)
+            for other in self._preview_refs():
+                if other.key == ref.key and source:
+                    other.use_source(source)
+                    other.group_locked = locked
+        elif self.manga_id is not None:
+            self.core.library.set_chapter_group(self.manga_id, ref, group)
+        self.list.viewport().update()
+        if ref.downloaded and group:
+            self.toast.emit('Release group changed', f"Chapter {ref.number} will come from {ref.group} "
+                            "the next time it's downloaded (right-click › Download again).", 'info')
 
     def _update_retry(self) -> None:
         failed = len(self.model.failed())
@@ -805,21 +943,25 @@ class ChapterPanel(QFrame):
         if self.manga_id is not None:
             self.core.updates.check_one(self.manga_id)
 
+    def _url(self) -> str:
+        return self.fetched.url if self.fetched else (self.core.library.get_manga(self.manga_id) or {}).get('url', '')
+
     def _open_folder(self) -> None:
-        title = self.title.text()
-        folder = self.core.library.manga_folder(title)
+        novel = is_novel_url(self._url())
+        folder = self.core.library.manga_folder(self.title.text(), novel)
         if not os.path.isdir(folder):
-            folder = self.core.library.download_root()
+            folder = self.core.library.download_root(novel)
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def _open_web(self) -> None:
-        url = self.fetched.url if self.fetched else (self.core.library.get_manga(self.manga_id) or {}).get('url', '')
+        url = self._url()
         if url:
             QDesktopServices.openUrl(QUrl(url))
 
     def _show_file(self, ref: ChapterRef) -> None:
         path = ref.file_path if ref.file_path and os.path.exists(ref.file_path) else ''
-        folder = os.path.dirname(path) if path else self.core.library.manga_folder(self.title.text())
+        folder = os.path.dirname(path) if path else self.core.library.manga_folder(self.title.text(),
+                                                                                    is_novel_url(self._url()))
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     # ============================================================= events

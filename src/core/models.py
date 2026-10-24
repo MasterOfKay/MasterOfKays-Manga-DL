@@ -21,7 +21,26 @@ SITE_LABELS = {
     'webtoon': 'Webtoon',
     'mangadex': 'MangaDex',
     'mangafreak': 'MangaFreak',
+    'atsumaru': 'Atsumaru',
 }
+
+# Sites where one chapter can come from several release (scanlation) groups.
+GROUP_SITES = ('mangadex', 'atsumaru')
+
+# Formats a light novel chapter can be saved as: key -> (label, file extension).
+NOVEL_FORMATS = {
+    'epub': ('EPUB', '.epub'),
+    'pdf': ('PDF', '.pdf'),
+    'docx': ('Word', '.docx'),
+    'html': ('HTML', '.html'),
+    'md': ('Markdown', '.md'),
+    'txt': ('Text', '.txt'),
+}
+
+
+def is_novel_url(url: str) -> bool:
+    """Light novels (text chapters) have their own address, e.g. https://atsu.moe/novel/<id>."""
+    return '/novel/' in (url or '')
 
 LANGUAGE_NAMES = {
     'en': 'English', 'ja': 'Japanese', 'ko': 'Korean', 'zh': 'Chinese', 'zh-hk': 'Chinese (HK)',
@@ -65,11 +84,11 @@ def chapter_title_only(name: str) -> str:
     return _NUMBER_PREFIX.sub('', (name or '').strip()).strip()
 
 
-def chapter_file_name(number: str, name: str) -> str:
+def chapter_file_name(number: str, name: str, ext: str = '.cbz') -> str:
     """'Chapter 1 - Chirp!.cbz' (or 'Chapter 1.cbz' without a name) - the Asura/Katana style."""
     title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', chapter_title_only(name))
     title = re.sub(r'\s+', ' ', title).strip(' .')[:120].strip()
-    return f"Chapter {number} - {title}.cbz" if title else f"Chapter {number}.cbz"
+    return f"Chapter {number} - {title}{ext}" if title else f"Chapter {number}{ext}"
 
 
 def parse_utc(value: str):
@@ -89,6 +108,27 @@ def chapter_sort_key(number: str) -> Tuple[float, str]:
 
 
 @dataclass
+class ChapterSource:
+    """One upload of a chapter by one release group."""
+    group: str
+    url: str
+    name: str = ''
+    volume: str = ''
+
+
+def pick_source(sources: List['ChapterSource'], preferred: str = '') -> Optional['ChapterSource']:
+    """The upload of the preferred group, else the first one (sites list their best first)."""
+    if not sources:
+        return None
+    if preferred:
+        wanted = preferred.casefold()
+        for source in sources:
+            if source.group.casefold() == wanted:
+                return source
+    return sources[0]
+
+
+@dataclass
 class ChapterRef:
     number: str
     name: str = ''
@@ -100,6 +140,13 @@ class ChapterRef:
     is_new: bool = False
     file_path: str = ''
     free_at: str = ''          # early access: when the chapter becomes free (ISO, UTC)
+    sources: List['ChapterSource'] = field(default_factory=list)   # every group's upload (2+ only)
+    group_locked: bool = False  # the user picked this group for this chapter
+
+    def use_source(self, source: 'ChapterSource') -> None:
+        self.url, self.group = source.url, source.group
+        self.name = source.name or self.name
+        self.volume = source.volume or self.volume
 
     @property
     def key(self) -> ChapterKey:
@@ -137,3 +184,8 @@ class FetchedManga:
     chapters: Dict[str, List[ChapterRef]] = field(default_factory=dict)   # language -> chapters
     cover_path: str = ''
     manga_id: Optional[int] = None       # set when this URL is already in the library
+    preferred_group: str = ''            # release group filter picked before saving
+
+    @property
+    def is_novel(self) -> bool:
+        return is_novel_url(self.url)

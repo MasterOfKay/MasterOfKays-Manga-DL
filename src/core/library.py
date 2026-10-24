@@ -6,6 +6,7 @@ keeping the database in sync with the files on disk.
 All network-bound methods block; call them from a worker thread.
 """
 
+import json
 import logging
 import os
 import re
@@ -17,18 +18,20 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from ..managers.database_manager import DatabaseManager, ChapterData, MangaMetadata as DBMetadata
-from ..sites import (AsuraComicsDownloader, MangaDexDownloader, MangaFreakDownloader, MangaKatanaDownloader,
-                     WebtoonDownloader)
+from ..sites import (AsuraComicsDownloader, AtsumaruDownloader, MangaDexDownloader, MangaFreakDownloader,
+                     MangaKatanaDownloader, WebtoonDownloader)
 from ..sites.base import ChapterInfo, ComicSiteBase
 from .events import EventBus
-from .models import ChapterRef, FetchedManga, chapter_file_name, chapter_sort_key, fix_text, plain_text
+from .models import (ChapterRef, ChapterSource, FetchedManga, chapter_file_name, chapter_sort_key, fix_text,
+                     is_novel_url, pick_source, plain_text)
 from .paths import covers_dir, sanitize_folder_name
 
 # Covers saved by older versions: Webtoon's transparent banner layer, MangaDex's small thumbnail.
 _LOW_QUALITY_COVER = re.compile(r'EpisodeList_PC_Character|_fg\.png|landingpage|uploads\.mangadex\.org/.+\.512\.jpg$',
                                 re.IGNORECASE)
 _ASURA_SUFFIX = re.compile(r'[\s\-–—|]+asura\s*(scans?|comics?|toon|scan)?\s*$', re.IGNORECASE)
-_BOOK_EXTS = ('.cbz', '.cbr', '.cb7', '.zip', '.pdf', '.epub')
+_BOOK_EXTS = ('.cbz', '.cbr', '.cb7', '.zip', '.pdf', '.epub', '.docx', '.html', '.md', '.txt')
+_TEXT_EXTS = ('.docx', '.html', '.md', '.txt')     # novel chapters - only with 'Chapter N' in the name
 _LANG_TAG = re.compile(r'^\s*\[(?P<tag>[A-Za-z]{2,3}(?:-[A-Za-z]{2})?)\]\s*')
 _LANG_SUFFIX = re.compile(r'\.(?P<tag>[a-z]{2}(?:-[a-z]{2})?)$')
 _CHAPTER_WORD = re.compile(r'(?:^|[^a-z])(?:chapter|chap|ch|episode|ep)\.?\s*(\d+(?:\.\d+)?)', re.IGNORECASE)
@@ -68,6 +71,8 @@ def parse_chapter_file(filename: str, folder_title: str = '') -> Optional[Tuple[
     match = _CHAPTER_WORD.search(stem)
     if match:
         return language, match.group(1)
+    if ext.lower() in _TEXT_EXTS:
+        return None         # e.g. a 'notes 2.txt' next to the chapters
 
     words = normalize_title(folder_title).split()
     if words:
@@ -109,6 +114,7 @@ class Library:
             'webtoon': WebtoonDownloader(),
             'mangadex': MangaDexDownloader(),
             'mangafreak': MangaFreakDownloader(),
+            'atsumaru': AtsumaruDownloader(),
         }
         self._folder_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
         self._folder_lock = threading.Lock()
@@ -191,7 +197,8 @@ class Library:
                 full['cover_image_path'] = ''
                 self._refresh_metadata(full, site)
                 new = (self.db.get_manga_by_id(manga['id']) or {}).get('cover_image_path') or ''
-                folder = os.path.join(self.download_root(), sanitize_folder_name(full['title']))
+                folder = os.path.join(self.download_root(is_novel_url(full.get('url', ''))),
+                                      sanitize_folder_name(full['title']))
                 if new and os.path.exists(new) and os.path.exists(os.path.join(folder, 'cover.png')):
                     with open(os.path.join(folder, 'cover.png'), 'wb') as f:
                         f.write(_png_bytes(new))
@@ -202,17 +209,26 @@ class Library:
         return fixed
 
     def supported_sites(self) -> List[str]:
-        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak']
+        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak', 'Atsumaru']
 
     # ---------------------------------------------------------------- folders
-    def download_root(self) -> str:
+    def download_root(self, novel: bool = False) -> str:
+        """The download folder - for light novels their own folder when one is set."""
+        if novel:
+            path = (self.settings.get('novels.download_path') or '').strip()
+            if path:
+                return path
         return self.settings.get_download_path()
 
-    def manga_folder(self, title: str) -> str:
+    def folder_of(self, manga: Dict) -> str:
+        """manga_folder() for a database row (picks the novel folder for light novels)."""
+        return self.manga_folder(manga.get('title', ''), is_novel_url(manga.get('url', '')))
+
+    def manga_folder(self, title: str, novel: bool = False) -> str:
         """Folder of a manga: the exact name if it exists, otherwise an existing
         folder whose name matches loosely (e.g. "Omniscient Reader's Viewpoint"
         -> "Omniscient Readers Viewpoint"), otherwise the exact name (to be created)."""
-        root = self.download_root()
+        root = self.download_root(novel)
         # Never put site branding like "- Asura Scans" into the folder name.
         title = _ASURA_SUFFIX.sub('', title or '').strip() or title
         exact = os.path.join(root, sanitize_folder_name(title))
@@ -271,6 +287,8 @@ class Library:
             setattr(meta, attr, fix_text(getattr(meta, attr, '') or ''))
         meta.description = plain_text(meta.description)
         title = clean_title(fix_text(getattr(meta, 'title', '') or site.get_manga_name(url)), key)
+        if is_novel_url(url) and 'novel' not in title.lower():
+            title += ' (Novel)'     # own entry and folder - the manga of the same name is a different series
         existing = (self.db.get_manga_by_url(url) or self.db.get_manga_by_url(original)
                     or self.db.get_manga_by_title(title))
 
@@ -308,6 +326,8 @@ class Library:
             last_updated=now,
             first_download=now,
         ), fetched.cover_path)
+        if fetched.preferred_group:
+            self.db.set_preferred_group(manga_id, fetched.preferred_group)
 
         rows = [self._chapter_data(ref) for refs in fetched.chapters.values() for ref in refs]
         self.db.merge_chapters(manga_id, rows, mark_new=False)
@@ -368,15 +388,45 @@ class Library:
         new_refs = [r for r in new_refs if r.key not in downloaded]
         return sorted(new_refs, key=lambda r: chapter_sort_key(r.number))
 
+    # --------------------------------------------------------- release groups
+    def set_preferred_group(self, manga_id: int, group: str) -> None:
+        """Use this group's uploads for every chapter it has (except chapters picked by hand
+        or already downloaded); the others keep the first available upload."""
+        self.db.set_preferred_group(manga_id, group)
+        changes = []
+        for ref in self.chapters(manga_id):
+            if ref.sources and not ref.group_locked and not ref.downloaded:
+                source = pick_source(ref.sources, group)
+                if source and source.url != ref.url:
+                    changes.append((ref.language, ref.number, source.url, source.group, False,
+                                    source.name, source.volume))
+        if changes:
+            self.db.set_chapter_sources(manga_id, changes)
+        self.bus.emit('library_changed', manga_id)
+
+    def set_chapter_group(self, manga_id: int, ref: ChapterRef, group: str) -> None:
+        """Download this chapter from `group`; '' goes back to the manga's group filter."""
+        manga = self.db.get_manga_by_id(manga_id) or {}
+        source = next((s for s in ref.sources if s.group == group), None) if group else None
+        locked = source is not None
+        source = source or pick_source(ref.sources, manga.get('preferred_group', ''))
+        if not source:
+            return
+        self.db.set_chapter_sources(manga_id, [(ref.language, ref.number, source.url, source.group, locked,
+                                                source.name, source.volume)])
+        ref.use_source(source)
+        ref.group_locked = locked
+        self.bus.emit('library_changed', manga_id)
+
     # ------------------------------------------------------------ disk sync
     def sync_files(self, manga_id: int) -> int:
         """Align download flags in the database with the CBZ files on disk."""
         manga = self.db.get_manga_by_id(manga_id)
         if not manga:
             return 0
-        if not os.path.isdir(self.download_root()):
+        if not os.path.isdir(self.download_root(is_novel_url(manga.get('url', '')))):
             return 0        # e.g. network share offline - never reset anything then
-        folder = self.manga_folder(manga['title'])
+        folder = self.folder_of(manga)
         is_mangadex = manga.get('site_type') == 'mangadex'
         if not os.path.isdir(folder):
             # Nothing of this manga is in the library folder (yet).
@@ -439,7 +489,7 @@ class Library:
         result = {'added': 0, 'updated': 0, 'unchanged': 0, 'skipped': 0, 'error': 0, 'folder_files': 0}
         if not manga:
             return result
-        folder = self.manga_folder(manga['title'])
+        folder = self.folder_of(manga)
         if not os.path.isdir(folder):
             return result
         rows = self.db.get_chapters_for_manga(manga_id)
@@ -460,9 +510,10 @@ class Library:
     def name_chapter_file(path: str, ref: ChapterRef) -> str:
         """'Chapter 1.cbz' -> 'Chapter 1 - Chirp!.cbz' when the chapter has a real name.
         Other file names (already named, MangaDex style, ...) are left alone."""
-        if not path or not re.fullmatch(rf'Chapter {re.escape(ref.number)}\.cbz', os.path.basename(path), re.I):
+        match = path and re.fullmatch(rf'Chapter {re.escape(ref.number)}(\.\w+)', os.path.basename(path), re.I)
+        if not match:
             return path
-        target = os.path.join(os.path.dirname(path), chapter_file_name(ref.number, ref.name))
+        target = os.path.join(os.path.dirname(path), chapter_file_name(ref.number, ref.name, match.group(1).lower()))
         if os.path.normcase(target) == os.path.normcase(path):
             return path
         try:
@@ -482,7 +533,7 @@ class Library:
             if manga.get('site_type') == 'mangadex':
                 continue
             manga = self.db.get_manga_by_id(manga['id']) or manga
-            folder = self.manga_folder(manga['title'])
+            folder = self.folder_of(manga)
             rows = self.db.get_chapters_for_manga(manga['id'])
             total = len({r['chapter_number'] for r in rows})
             on_disk = [r for r in rows if r.get('is_downloaded') and r.get('file_path')
@@ -491,9 +542,12 @@ class Library:
             for row in on_disk:
                 ref = self._ref_from_row(row)
                 old = row['file_path']
-                target = os.path.join(os.path.dirname(old), chapter_file_name(ref.number, ref.name))
-                if os.path.basename(target) == os.path.basename(old) or not re.fullmatch(
-                        rf'Chapter {re.escape(ref.number)}\.cbz', os.path.basename(old), re.I):
+                match = re.fullmatch(rf'Chapter {re.escape(ref.number)}(\.\w+)', os.path.basename(old), re.I)
+                if not match:
+                    continue
+                target = os.path.join(os.path.dirname(old),
+                                      chapter_file_name(ref.number, ref.name, match.group(1).lower()))
+                if os.path.basename(target) == os.path.basename(old):
                     continue
                 if dry_run:
                     done.append((old, target))
@@ -533,6 +587,8 @@ class Library:
                 headers['Referer'] = 'https://asuracomic.net/'
             elif 'mangadex' in cover_url:
                 headers['Referer'] = 'https://mangadex.org/'
+            elif 'atsu.moe' in cover_url:
+                headers['Referer'] = 'https://atsu.moe/'
             elif 'mangafreak' in cover_url:
                 headers['Referer'] = 'https://ww3.mangafreak.me/'
             response = requests.get(cover_url, headers=headers, timeout=30)
@@ -547,27 +603,64 @@ class Library:
     # --------------------------------------------------------------- helpers
     def _fetch_chapters(self, key: str, site: ComicSiteBase, url: str,
                         manga_id: Optional[int]) -> Dict[str, List[ChapterRef]]:
+        """language -> chapters. When several groups uploaded a chapter, all of them end up in
+        ref.sources (in the site's order) and one is chosen - see _choose_source."""
         if key == 'webtoon' and manga_id:
             items = site.get_chapter_links(url, db_manager=self.db, manga_id=manga_id)  # incremental scan
         else:
             items = site.get_chapter_links(url)
 
-        by_language: Dict[str, Dict[str, ChapterRef]] = {}
+        by_language: Dict[str, Dict[str, List[ChapterRef]]] = {}
         for item in items or []:
             if isinstance(item, ChapterInfo):
                 number = str(item.chapter_number or '0')
                 ref = ChapterRef(number=number, name=fix_text(item.title) or f"Chapter {number}",
                                  url=item.chapter_url or item.chapter_id, language=(item.language or 'en'),
-                                 volume=item.volume_number or '', group=item.scanlation_group or '')
+                                 volume=item.volume_number or '', group=fix_text(item.scanlation_group or ''))
             elif isinstance(item, (tuple, list)) and len(item) >= 3:
                 ref = ChapterRef(number=str(item[0]), name=fix_text(str(item[1] or '')), url=str(item[2] or ''),
                                  free_at=str(item[3] or '') if len(item) > 3 else '')
             else:
                 continue
-            by_language.setdefault(ref.language, {}).setdefault(ref.number, ref)
+            by_language.setdefault(ref.language, {}).setdefault(ref.number, []).append(ref)
 
-        return {lang: sorted(refs.values(), key=lambda r: chapter_sort_key(r.number))
-                for lang, refs in by_language.items()}
+        known: Dict[Tuple[str, str], Dict] = {}
+        preferred = ''
+        if manga_id:
+            known = {(r['language'], r['chapter_number']): r for r in self.db.get_chapters_for_manga(manga_id)}
+            preferred = (self.db.get_manga_by_id(manga_id) or {}).get('preferred_group', '')
+        result: Dict[str, List[ChapterRef]] = {}
+        for lang, numbers in by_language.items():
+            refs = []
+            for number, uploads in numbers.items():
+                ref = uploads[0]
+                sources = self._sources(uploads)
+                if len(sources) > 1:
+                    ref.sources = sources
+                    self._choose_source(ref, preferred, known.get((lang, number)))
+                refs.append(ref)
+            result[lang] = sorted(refs, key=lambda r: chapter_sort_key(r.number))
+        return result
+
+    @staticmethod
+    def _sources(uploads: List[ChapterRef]) -> List[ChapterSource]:
+        """One upload per group, in the site's order."""
+        sources: Dict[str, ChapterSource] = {}
+        for ref in uploads:
+            group = ref.group or 'No group'
+            sources.setdefault(group.casefold(), ChapterSource(group=group, url=ref.url, name=ref.name,
+                                                              volume=ref.volume))
+        return list(sources.values())
+
+    @staticmethod
+    def _choose_source(ref: ChapterRef, preferred: str, row: Optional[Dict]) -> None:
+        """The group picked by hand, else the group of the file on disk, else the preferred group,
+        else the first available."""
+        kept = None
+        if row and row.get('group_name') and (row.get('group_locked') or row.get('is_downloaded')):
+            kept = next((s for s in ref.sources if s.group == row['group_name']), None)
+        ref.use_source(kept or pick_source(ref.sources, preferred))
+        ref.group_locked = bool(kept and row.get('group_locked'))
 
     def _needs_metadata(self, manga: Dict) -> bool:
         cover = manga.get('cover_image_path') or ''
@@ -612,9 +705,11 @@ class Library:
 
     @staticmethod
     def _chapter_data(ref: ChapterRef) -> ChapterData:
+        sources = json.dumps([s.__dict__ for s in ref.sources], ensure_ascii=False) if ref.sources else ''
         return ChapterData(chapter_number=ref.number, chapter_name=ref.name or f"Chapter {ref.number}",
                            chapter_url=ref.url, language=ref.language, volume_number=ref.volume,
-                           free_at=ref.free_at)
+                           free_at=ref.free_at, group_name=ref.group, group_locked=ref.group_locked,
+                           sources=sources)
 
     @staticmethod
     def _ref_from_row(row: Dict) -> ChapterRef:
@@ -622,4 +717,12 @@ class Library:
                           url=row.get('chapter_url') or '', language=row.get('language') or 'en',
                           volume=row.get('volume_number') or '', downloaded=bool(row.get('is_downloaded')),
                           is_new=bool(row.get('is_new')), file_path=row.get('file_path') or '',
-                          free_at=row.get('free_at') or '')
+                          free_at=row.get('free_at') or '', group=row.get('group_name') or '',
+                          group_locked=bool(row.get('group_locked')), sources=Library._load_sources(row))
+
+    @staticmethod
+    def _load_sources(row: Dict) -> List[ChapterSource]:
+        try:
+            return [ChapterSource(**s) for s in json.loads(row.get('sources') or '[]')]
+        except (ValueError, TypeError):
+            return []

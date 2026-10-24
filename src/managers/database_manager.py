@@ -48,6 +48,9 @@ class ChapterData:
     download_date: str = ""
     file_path: str = ""
     free_at: str = ""        # ISO time (UTC) an early-access chapter becomes free; '' = always free
+    group_name: str = ""     # release group of the chosen upload
+    group_locked: bool = False   # picked by the user for this chapter
+    sources: str = ""        # JSON list of every group's upload when there are several
 
 
 class DatabaseManager:
@@ -227,6 +230,16 @@ class DatabaseManager:
                 if 'free_at' not in [column[1] for column in cursor.fetchall()]:
                     logging.info("Adding free_at (early access) column to chapters table")
                     cursor.execute("ALTER TABLE chapters ADD COLUMN free_at TEXT DEFAULT ''")
+                cursor.execute("PRAGMA table_info(chapters)")
+                chapters_columns = [column[1] for column in cursor.fetchall()]
+                if 'group_name' not in chapters_columns:
+                    logging.info("Adding release group columns to chapters table")
+                    cursor.execute("ALTER TABLE chapters ADD COLUMN group_name TEXT DEFAULT ''")
+                    cursor.execute("ALTER TABLE chapters ADD COLUMN group_locked INTEGER DEFAULT 0")
+                    cursor.execute("ALTER TABLE chapters ADD COLUMN sources TEXT DEFAULT ''")
+                if 'preferred_group' not in columns:
+                    logging.info("Adding preferred_group column to manga table")
+                    cursor.execute("ALTER TABLE manga ADD COLUMN preferred_group TEXT DEFAULT ''")
 
                 cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='manga'")
                 table_sql = cursor.fetchone()
@@ -450,18 +463,22 @@ class DatabaseManager:
                 for ch in chapters:
                     cursor.execute("""
                         INSERT OR IGNORE INTO chapters
-                        (manga_id, chapter_number, chapter_name, chapter_url, language, volume_number, is_new, free_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (manga_id, chapter_number, chapter_name, chapter_url, language, volume_number, is_new, free_at,
+                         group_name, group_locked, sources)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (manga_id, ch.chapter_number, ch.chapter_name, ch.chapter_url,
-                          ch.language, ch.volume_number, 1 if mark_new else 0, ch.free_at))
+                          ch.language, ch.volume_number, 1 if mark_new else 0, ch.free_at,
+                          ch.group_name, int(ch.group_locked), ch.sources))
                     if cursor.rowcount:
                         inserted.append(ch)
                     else:
                         cursor.execute("""
                             UPDATE chapters SET chapter_name = ?, chapter_url = ?, free_at = ?,
-                                   volume_number = CASE WHEN ? != '' THEN ? ELSE volume_number END
+                                   volume_number = CASE WHEN ? != '' THEN ? ELSE volume_number END,
+                                   group_name = ?, group_locked = ?, sources = ?
                             WHERE manga_id = ? AND chapter_number = ? AND language = ?
                         """, (ch.chapter_name, ch.chapter_url, ch.free_at, ch.volume_number, ch.volume_number,
+                              ch.group_name, int(ch.group_locked), ch.sources,
                               manga_id, ch.chapter_number, ch.language))
                 conn.commit()
         except Exception as e:
@@ -483,6 +500,30 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"Error removing missing chapters for manga ID {manga_id}: {e}")
             return 0
+
+    def set_chapter_sources(self, manga_id: int, changes: List[tuple]) -> None:
+        """Switch chapters to another group's upload.
+        changes: (language, chapter_number, url, group_name, locked, name, volume) per chapter."""
+        try:
+            with self._connect() as conn:
+                conn.executemany("""
+                    UPDATE chapters SET chapter_url = ?, group_name = ?, group_locked = ?,
+                           chapter_name = CASE WHEN ? != '' THEN ? ELSE chapter_name END,
+                           volume_number = CASE WHEN ? != '' THEN ? ELSE volume_number END
+                    WHERE manga_id = ? AND chapter_number = ? AND language = ?
+                """, [(url, group, int(locked), name, name, volume, volume, manga_id, number, language)
+                      for language, number, url, group, locked, name, volume in changes])
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error changing release groups of manga ID {manga_id}: {e}")
+
+    def set_preferred_group(self, manga_id: int, group_name: str) -> None:
+        try:
+            with self._connect() as conn:
+                conn.execute('UPDATE manga SET preferred_group = ? WHERE id = ?', (group_name or '', manga_id))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Error setting the release group of manga ID {manga_id}: {e}")
 
     def update_manga_description(self, manga_id: int, description: str) -> None:
         try:
@@ -664,7 +705,7 @@ class DatabaseManager:
                     SELECT id, title, url, site_type, description, author, genres, status,
                            release_date, alternative_names, cover_image_url, cover_image_path,
                            first_download, last_updated, last_page_scanned, total_pages, 
-                           last_chapter_scan, chapters_cached
+                           last_chapter_scan, chapters_cached, preferred_group
                     FROM manga WHERE id = ?
                 ''', (manga_id,))
                 
@@ -690,7 +731,8 @@ class DatabaseManager:
                     'last_page_scanned': result[14] if len(result) > 14 else 0,
                     'total_pages': result[15] if len(result) > 15 else 0,
                     'last_chapter_scan': result[16] if len(result) > 16 else '',
-                    'chapters_cached': result[17] if len(result) > 17 else 0
+                    'chapters_cached': result[17] if len(result) > 17 else 0,
+                    'preferred_group': result[18] or '',
                 }
                 
         except Exception as e:
@@ -707,7 +749,7 @@ class DatabaseManager:
                     SELECT id, title, url, site_type, description, author, genres, status,
                            release_date, alternative_names, cover_image_url, cover_image_path,
                            first_download, last_updated, last_page_scanned, total_pages, 
-                           last_chapter_scan, chapters_cached
+                           last_chapter_scan, chapters_cached, preferred_group
                     FROM manga WHERE url = ?
                 ''', (url,))
                 
@@ -733,7 +775,8 @@ class DatabaseManager:
                     'last_page_scanned': result[14] if len(result) > 14 else 0,
                     'total_pages': result[15] if len(result) > 15 else 0,
                     'last_chapter_scan': result[16] if len(result) > 16 else '',
-                    'chapters_cached': result[17] if len(result) > 17 else 0
+                    'chapters_cached': result[17] if len(result) > 17 else 0,
+                    'preferred_group': result[18] or '',
                 }
                 
         except Exception as e:
@@ -748,7 +791,7 @@ class DatabaseManager:
                 
                 query = '''
                     SELECT chapter_number, chapter_name, chapter_url, language, volume_number, is_downloaded, 
-                           download_date, file_path, is_new, free_at
+                           download_date, file_path, is_new, free_at, group_name, group_locked, sources
                     FROM chapters 
                     WHERE manga_id = ?
                 '''
@@ -779,6 +822,9 @@ class DatabaseManager:
                         'file_path': row[7],
                         'is_new': bool(row[8]),
                         'free_at': row[9] or '',
+                        'group_name': row[10] or '',
+                        'group_locked': bool(row[11]),
+                        'sources': row[12] or '',
                     })
                 
                 return chapters

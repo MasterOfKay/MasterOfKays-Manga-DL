@@ -25,7 +25,7 @@ from ..sites.base import ChapterInfo, ChapterUnavailable, StorageUnavailable
 from .events import EventBus
 from .library import Library
 from .metadata_files import embed_chapter_metadata, write_folder_metadata
-from .models import ChapterKey, ChapterRef, chapter_file_name
+from .models import ChapterKey, ChapterRef, chapter_file_name, is_novel_url
 from .paths import data_dir
 
 QUEUED, DOWNLOADING, DONE, FAILED, CANCELLED = 'queued', 'downloading', 'done', 'failed', 'cancelled'
@@ -115,6 +115,7 @@ class DownloadManager:
         self._draining = False           # closing: finish the current chapter, start nothing new
         self._restoring = False
         self._storage: Optional[Tuple[str, str]] = None    # (kind, message) while the queue is stopped
+        self._storage_root = ''      # folder the current/blocked job saves to (novels may have their own)
         self._save_lock = threading.Lock()
         self.queue_file = os.path.join(data_dir(), 'queue.json')
         self._thread = threading.Thread(target=self._run, name="downloader", daemon=True)
@@ -228,6 +229,8 @@ class DownloadManager:
                     continue
                 if ref.key not in job.states:
                     job.chapters.append(ref)
+                else:       # downloaded again - maybe from another release group now
+                    job.chapters = [ref if c.key == ref.key else c for c in job.chapters]
                 job.states[ref.key] = QUEUED
                 job.progress[ref.key] = 0
                 added += 1
@@ -335,7 +338,8 @@ class DownloadManager:
     def _run(self) -> None:
         while True:
             storage = self.storage_error()
-            if storage and storage[0] == STORAGE_OFFLINE and not storage_problem(self.library.download_root()):
+            root = self._storage_root or self.library.download_root()
+            if storage and storage[0] == STORAGE_OFFLINE and not storage_problem(root):
                 logging.info("The download folder is reachable again - continuing")
                 self.resume_storage()      # a full drive waits for the user instead
             with self._lock:
@@ -375,13 +379,15 @@ class DownloadManager:
         key, site = self.library.resolve(job.url)
         if not site:
             raise RuntimeError("Unsupported or outdated link")
-        root = self.library.download_root()
+        novel = is_novel_url(job.url)
+        root = self.library.download_root(novel)
+        self._storage_root = root
         try:
             os.makedirs(root, exist_ok=True)
         except OSError as e:
             self._block(job, storage_problem(root, str(e)) or (STORAGE_OFFLINE, str(e)))
             return
-        folder = self.library.manga_folder(job.title)
+        folder = self.library.manga_folder(job.title, novel)
         job.folder_name = os.path.basename(folder)
 
         if self.settings.notification_enabled('download_started'):
@@ -481,6 +487,7 @@ class DownloadManager:
         if path and site_key != 'mangadex':          # MangaDex files carry their own naming
             path = self.library.name_chapter_file(path, ref)
         if path:
+            self._drop_replaced_file(ref, path, folder)
             language = ref.language if site_key == 'mangadex' else None
             self.library.db.mark_chapter_downloaded(job.manga_id, ref.number, path, language=language)
             downloaded = [r for r in self.library.db.get_chapters_for_manga(job.manga_id) if r['is_downloaded']]
@@ -501,6 +508,22 @@ class DownloadManager:
             logging.error(f"Failed {job.title} chapter {ref.number}: {error}")
         self._emit_chapter(job, ref)
         self.bus.emit('job_progress', job.id)
+
+    @staticmethod
+    def _drop_replaced_file(ref: ChapterRef, path: str, folder: str) -> None:
+        """Downloaded again under another name (other release group, other novel format):
+        remove the old file so the chapter isn't in the folder twice."""
+        old = ref.file_path
+        if not old or not os.path.isfile(old) or os.path.normcase(os.path.abspath(old)) == os.path.normcase(
+                os.path.abspath(path)):
+            return
+        if os.path.normcase(os.path.dirname(os.path.abspath(old))) != os.path.normcase(os.path.abspath(folder)):
+            return      # only files in this manga's folder
+        try:
+            os.remove(old)
+            logging.info(f"Replaced {os.path.basename(old)} with {os.path.basename(path)}")
+        except OSError as e:
+            logging.warning(f"Couldn't remove the old file {old}: {e}")
 
     def _call_site(self, job: Job, site_key: str, site, ref: ChapterRef, root: str) -> str:
         last = [-1]
@@ -527,6 +550,13 @@ class DownloadManager:
                 # blocking the worker, so the next manga in the queue can start.
                 cancel_check=lambda: job.cancelled or self._interrupted(job, site_key),
             )
+        elif is_novel_url(job.url) and hasattr(site, 'download_novel_chapter'):
+            manga = self.library.get_manga(job.manga_id) or {}
+            result = site.download_novel_chapter(
+                ref.url, ref.number, name, root, on_progress,
+                fmt=self.settings.get('novels.format', 'epub'), series=job.title, title=ref.display_name,
+                author=manga.get('author') or '', cover_path=manga.get('cover_image_path') or '',
+                language=ref.language)
         elif hasattr(site, 'download_chapter_with_name') and ref.name:
             result = site.download_chapter_with_name(ref.url, ref.number, ref.name, name, root, on_progress)
         else:

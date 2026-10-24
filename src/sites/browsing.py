@@ -36,6 +36,10 @@ class BrowseItem:
     def __post_init__(self):
         self.title = fix_text(self.title)
 
+    @property
+    def is_novel(self) -> bool:
+        return '/novel/' in self.url
+
 
 def genre_key(name: str) -> str:
     """Site-independent key for a category name ("Sci-fi", "SF", "sci_fi" -> "scifi")."""
@@ -436,7 +440,75 @@ class MangaFreakBrowser(SiteBrowser):
             genres=[a.get_text(strip=True) for a in it.select('a[href^="/Genre/"]')])
 
 
-BROWSERS = [KatanaBrowser, AsuraBrowser, MangaDexBrowser, WebtoonBrowser, MangaFreakBrowser]
+# --------------------------------------------------------------------- Atsumaru
+class AtsumaruBrowser(SiteBrowser):
+    key, label = 'atsumaru', 'Atsumaru'
+    base = 'https://atsu.moe'
+    _skip = {'Hentai'}               # adult titles are filtered out anyway
+
+    def genres(self):
+        cached = self.cache.get('genres')
+        if cached:
+            return cached
+        response = self.session.get(f'{self.base}/api/explore/availableFilters', timeout=30)
+        response.raise_for_status()
+        result = sorted(((g['name'], g['id']) for g in response.json().get('genres', [])
+                         if g.get('name') and g['name'] not in self._skip), key=lambda x: x[0].lower())
+        self.cache.put('genres', result)
+        return result
+
+    def browse(self, query='', genre_slug='', page=1):
+        if not query and not genre_slug:
+            response = self.session.get(f'{self.base}/api/home2/recentlyUpdated', timeout=30,
+                                        params={'offset': (page - 1) * PAGE_SIZE, 'limit': PAGE_SIZE})
+            response.raise_for_status()
+            rows = response.json().get('items', [])
+            return [self._latest_item(r) for r in rows if r.get('id')], len(rows) >= PAGE_SIZE
+        # The site's own search index: title search and/or genre, most viewed first.
+        filters = ['hidden:!=true', 'isAdult:=false']
+        if genre_slug:
+            filters.append(f'genreIds:={genre_slug}')
+        params = {'q': query.strip() or '*', 'query_by': 'title,englishTitle,otherNames',
+                  'filter_by': ' && '.join(filters), 'page': page, 'per_page': PAGE_SIZE}
+        if not query:
+            params['sort_by'] = 'views:desc'
+        response = self.session.get(f'{self.base}/collections/manga/documents/search', params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        items = [self._search_item(h.get('document', {})) for h in data.get('hits', [])]
+        return [i for i in items if i], data.get('found', 0) > page * PAGE_SIZE
+
+    def _cover(self, path: str) -> str:
+        from .atsumaru import static_url
+        # Full JPEG: the smaller variants are AVIF, which Qt can't always show.
+        return static_url(re.sub(r'-(small|medium|large)\.avif$', '.jpg', path or ''))
+
+    def _url(self, row) -> str:
+        """Light novels (text chapters, saved as EPUB) have their own address."""
+        kind = 'novel' if row.get('medium') == 'Novel' else 'manga'
+        return f"{self.base}/{kind}/{row['id']}"
+
+    def _latest_item(self, row) -> BrowseItem:
+        when = ''
+        if row.get('updatedAt'):
+            minutes = max(0, int((time.time() * 1000 - row['updatedAt']) / 60000))
+            when = (f"{minutes} min ago" if minutes < 60 else f"{minutes // 60} h ago" if minutes < 1440
+                    else f"{minutes // 1440} d ago")
+        return BrowseItem(title=row.get('title', ''), url=self._url(row), site=self.key,
+                          cover_url=self._cover(row.get('image', '')),
+                          latest=f"Updated {when}" if when else '')
+
+    def _search_item(self, doc) -> Optional[BrowseItem]:
+        if not doc.get('id') or not doc.get('title'):
+            return None
+        count = doc.get('chapterCount')
+        return BrowseItem(title=doc['title'], url=self._url(doc), site=self.key,
+                          cover_url=self._cover(doc.get('poster', '')),
+                          latest=f"{count} chapters" if count else '',
+                          status=(doc.get('status') or '').lower(), genres=list(doc.get('tags') or []))
+
+
+BROWSERS = [KatanaBrowser, AsuraBrowser, MangaDexBrowser, WebtoonBrowser, MangaFreakBrowser, AtsumaruBrowser]
 
 REFERERS = {
     'mangakatana': 'https://mangakatana.com/',
@@ -444,5 +516,6 @@ REFERERS = {
     'webtoon': 'https://www.webtoons.com/',
     'mangadex': 'https://mangadex.org/',
     'mangafreak': 'https://ww3.mangafreak.me/',
+    'atsumaru': 'https://atsu.moe/',
 }
 
