@@ -17,7 +17,8 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from ..managers.database_manager import DatabaseManager, ChapterData, MangaMetadata as DBMetadata
-from ..sites import AsuraComicsDownloader, MangaKatanaDownloader, WebtoonDownloader, MangaDexDownloader
+from ..sites import (AsuraComicsDownloader, MangaDexDownloader, MangaFreakDownloader, MangaKatanaDownloader,
+                     WebtoonDownloader)
 from ..sites.base import ChapterInfo, ComicSiteBase
 from .events import EventBus
 from .models import ChapterRef, FetchedManga, chapter_file_name, chapter_sort_key, fix_text, plain_text
@@ -107,6 +108,7 @@ class Library:
             'mangakatana': MangaKatanaDownloader(),
             'webtoon': WebtoonDownloader(),
             'mangadex': MangaDexDownloader(),
+            'mangafreak': MangaFreakDownloader(),
         }
         self._folder_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
         self._folder_lock = threading.Lock()
@@ -200,7 +202,7 @@ class Library:
         return fixed
 
     def supported_sites(self) -> List[str]:
-        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex']
+        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak']
 
     # ---------------------------------------------------------------- folders
     def download_root(self) -> str:
@@ -531,6 +533,8 @@ class Library:
                 headers['Referer'] = 'https://asuracomic.net/'
             elif 'mangadex' in cover_url:
                 headers['Referer'] = 'https://mangadex.org/'
+            elif 'mangafreak' in cover_url:
+                headers['Referer'] = 'https://ww3.mangafreak.me/'
             response = requests.get(cover_url, headers=headers, timeout=30)
             response.raise_for_status()
             with open(path, 'wb') as f:

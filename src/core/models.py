@@ -20,6 +20,7 @@ SITE_LABELS = {
     'katana': 'MangaKatana',
     'webtoon': 'Webtoon',
     'mangadex': 'MangaDex',
+    'mangafreak': 'MangaFreak',
 }
 
 LANGUAGE_NAMES = {

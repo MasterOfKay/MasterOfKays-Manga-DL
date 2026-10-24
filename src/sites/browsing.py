@@ -335,12 +335,114 @@ class MangaDexBrowser(SiteBrowser):
             genres=[t.get('attributes', {}).get('name', {}).get('en', '') for t in attrs.get('tags', [])])
 
 
-BROWSERS = [KatanaBrowser, AsuraBrowser, MangaDexBrowser, WebtoonBrowser]
+# ------------------------------------------------------------------- MangaFreak
+class MangaFreakBrowser(SiteBrowser):
+    key, label = 'mangafreak', 'MangaFreak'
+    base = 'https://ww3.mangafreak.me'
+    # Entries of the site's genre menu whose pages are empty (checked Oct 2026), plus duplicates.
+    # "Shoujoai"/"Shounenai" are the working ones; "Shoujo Ai"/"Shounen Ai" are (nearly) empty.
+    _skip = {'All', 'Add', 'Actions', 'Full Color', 'Isekai', 'Lolicon', 'Manhwa', 'Reincarnation',
+             'School Of Life', 'Shotacon', 'Shoujo Ai', 'Shounen Ai', 'Superhero', 'Villainess',
+             'Web Comic', 'Webtoon', 'Historica', 'Life'}
+
+    def genres(self):
+        cached = self.cache.get('genres')
+        if cached:
+            return cached
+        soup, _ = self._soup(f'{self.base}/Genre')
+        found = {}
+        for a in soup.find_all('a', href=re.compile(r'^/Genre/[A-Za-z_]+$')):
+            name = a.get_text(strip=True)
+            if name and name not in self._skip:
+                found.setdefault(a['href'].rsplit('/', 1)[1], name)
+        result = sorted(((n, s) for s, n in found.items()), key=lambda x: x[0].lower())
+        self.cache.put('genres', result)
+        return result
+
+    def browse(self, query='', genre_slug='', page=1):
+        if query:
+            # One page of results, no paging. Spaces must be '+' in the path.
+            soup, _ = self._soup(f"{self.base}/Find/{requests.utils.quote(query.strip(), safe='').replace('%20', '+')}")
+            items = [self._search_item(it) for it in soup.select('.manga_search_item')]
+            items = [i for i in items if i]
+            if genre_slug:
+                wanted = genre_key(genre_slug)
+                items = [i for i in items if any(genre_key(g) == wanted for g in i.genres)]
+            return items, False
+        if genre_slug:
+            soup, _ = self._soup(f'{self.base}/Genre/{genre_slug}/{page}')
+            items = [self._ranking_item(it) for it in soup.select('.ranking_item')]
+            more = bool(soup.find('a', href=f'/Genre/{genre_slug}/{page + 1}'))
+        else:
+            soup, _ = self._soup(f'{self.base}/Latest_Releases/{page}')
+            items = [self._latest_item(it) for it in soup.select('.latest_releases_item')]
+            more = bool(soup.find('a', href=f'/Latest_Releases/{page + 1}'))
+        return [i for i in items if i], more
+
+    def _url(self, href: str) -> str:
+        return self.base + href if href.startswith('/') else href
+
+    @staticmethod
+    def _cover(href: str) -> str:
+        """Full-size cover from the series slug ('/Manga/Lost_Man' -> .../manga_images/lost_man.jpg);
+        the latest list itself only has 55x85 thumbnails."""
+        slug = href.rstrip('/').rsplit('/', 1)[-1].lower()
+        return f'https://images.mangafreak.me/manga_images/{slug}.jpg'
+
+    @staticmethod
+    def _status(text: str) -> str:
+        found = re.search(r'\((ongoing|completed)\)', text, re.I)
+        return found.group(1).lower() if found else ''
+
+    def _latest_item(self, it) -> Optional[BrowseItem]:
+        link = it.select_one('.latest_releases_info > a[href^="/Manga/"]')
+        if not link:
+            return None
+        chapter = it.select_one('.latest_releases_info div a')
+        number = re.search(r'(\d+(?:\.\d+)?[a-z]?)\s*$', chapter.get_text(strip=True)) if chapter else None
+        when = it.select_one('.latest_releases_time')
+        picture = it.select_one('.latest_releases_image')
+        classes = ' '.join(picture.get('class', [])) if picture else ''
+        latest = f"Chapter {number.group(1)}" if number else ''
+        return BrowseItem(
+            title=link.get_text(strip=True), url=self._url(link['href']), site=self.key,
+            cover_url=self._cover(link['href']),
+            latest=' · '.join(x for x in (latest, when.get_text(strip=True) if when else '') if x),
+            status='completed' if 'complete' in classes else 'ongoing' if 'ongoing' in classes else '')
+
+    def _ranking_item(self, it) -> Optional[BrowseItem]:
+        link = it.select_one('.ranking_item_info a[href^="/Manga/"]')
+        if not link:
+            return None
+        img = it.select_one('.ranking_item_image img')
+        text = it.get_text(' ', strip=True)
+        count = re.search(r'(\d+)\w*\s+Published', text)
+        return BrowseItem(
+            title=link.get_text(strip=True), url=self._url(link['href']), site=self.key,
+            cover_url=img.get('src', '') if img else self._cover(link['href']),
+            latest=f"{count.group(1)} chapters" if count else '', status=self._status(text))
+
+    def _search_item(self, it) -> Optional[BrowseItem]:
+        link = it.select_one('h3 a[href^="/Manga/"]')
+        if not link:
+            return None
+        img = it.select_one('img')
+        text = it.get_text(' ', strip=True)
+        count = re.search(r'(\d+)\s+Chapters Published', text)
+        return BrowseItem(
+            title=link.get_text(strip=True), url=self._url(link['href']), site=self.key,
+            cover_url=img.get('src', '') if img else self._cover(link['href']),
+            latest=f"{count.group(1)} chapters" if count else '', status=self._status(text),
+            genres=[a.get_text(strip=True) for a in it.select('a[href^="/Genre/"]')])
+
+
+BROWSERS = [KatanaBrowser, AsuraBrowser, MangaDexBrowser, WebtoonBrowser, MangaFreakBrowser]
 
 REFERERS = {
     'mangakatana': 'https://mangakatana.com/',
     'asura': 'https://asurascans.com/',
     'webtoon': 'https://www.webtoons.com/',
     'mangadex': 'https://mangadex.org/',
+    'mangafreak': 'https://ww3.mangafreak.me/',
 }
 
