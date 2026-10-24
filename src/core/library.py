@@ -20,7 +20,7 @@ from ..managers.database_manager import DatabaseManager, ChapterData, MangaMetad
 from ..sites import AsuraComicsDownloader, MangaKatanaDownloader, WebtoonDownloader, MangaDexDownloader
 from ..sites.base import ChapterInfo, ComicSiteBase
 from .events import EventBus
-from .models import ChapterRef, FetchedManga, chapter_sort_key, fix_text, plain_text
+from .models import ChapterRef, FetchedManga, chapter_file_name, chapter_sort_key, fix_text, plain_text
 from .paths import covers_dir, sanitize_folder_name
 
 # Covers saved by older versions: Webtoon's transparent banner layer, MangaDex's small thumbnail.
@@ -402,7 +402,8 @@ class Library:
             path = stored if stored and self._inside(stored, folder) and os.path.exists(stored) else None
             disk_key = ((language or 'en').lower() if is_mangadex else None, self._norm(number))
             path = path or on_disk.get(disk_key)
-            if path and not ch['is_downloaded']:
+            moved = bool(path) and os.path.normcase(os.path.normpath(path)) != os.path.normcase(os.path.normpath(stored))
+            if path and (not ch['is_downloaded'] or moved):      # new, or renamed/moved on disk
                 self.db.mark_chapter_downloaded(manga_id, number, path, language=language)
                 changed += 1
             elif not path and ch['is_downloaded']:
@@ -444,6 +445,59 @@ class Library:
             status = embed_chapter_metadata(path, manga, chapter, self.settings, total, folder, overwrite)
             result[status] = result.get(status, 0) + 1
         return result
+
+    @staticmethod
+    def name_chapter_file(path: str, ref: ChapterRef) -> str:
+        """'Chapter 1.cbz' -> 'Chapter 1 - Chirp!.cbz' when the chapter has a real name.
+        Other file names (already named, MangaDex style, ...) are left alone."""
+        if not path or not re.fullmatch(rf'Chapter {re.escape(ref.number)}\.cbz', os.path.basename(path), re.I):
+            return path
+        target = os.path.join(os.path.dirname(path), chapter_file_name(ref.number, ref.name))
+        if os.path.normcase(target) == os.path.normcase(path):
+            return path
+        try:
+            os.replace(path, target)
+            return target
+        except OSError as e:
+            logging.warning(f"Couldn't rename {path} to {os.path.basename(target)}: {e}")
+            return path
+
+    def add_chapter_names(self, manga_id: Optional[int] = None, dry_run: bool = False) -> List[Tuple[str, str]]:
+        """Rename downloaded 'Chapter N.cbz' files to 'Chapter N - Name.cbz' and rewrite the
+        title inside them. Only files in the current download folder. Returns (old, new) names."""
+        from .metadata_files import embed_chapter_metadata
+        done: List[Tuple[str, str]] = []
+        mangas = [self.db.get_manga_by_id(manga_id)] if manga_id else self.db.get_manga_list()
+        for manga in filter(None, mangas):
+            if manga.get('site_type') == 'mangadex':
+                continue
+            manga = self.db.get_manga_by_id(manga['id']) or manga
+            folder = self.manga_folder(manga['title'])
+            rows = self.db.get_chapters_for_manga(manga['id'])
+            total = len({r['chapter_number'] for r in rows})
+            on_disk = [r for r in rows if r.get('is_downloaded') and r.get('file_path')
+                       and self._inside(r['file_path'], folder) and os.path.exists(r['file_path'])]
+            first = self.first_chapter_number(on_disk)
+            for row in on_disk:
+                ref = self._ref_from_row(row)
+                old = row['file_path']
+                target = os.path.join(os.path.dirname(old), chapter_file_name(ref.number, ref.name))
+                if os.path.basename(target) == os.path.basename(old) or not re.fullmatch(
+                        rf'Chapter {re.escape(ref.number)}\.cbz', os.path.basename(old), re.I):
+                    continue
+                if dry_run:
+                    done.append((old, target))
+                    continue
+                new = self.name_chapter_file(old, ref)
+                if new == old:
+                    continue
+                self.db.mark_chapter_downloaded(manga['id'], ref.number, new, language=None)
+                chapter = {'number': ref.number, 'name': ref.display_name, 'language': ref.language,
+                           'volume': ref.volume, 'is_first': ref.number == first}
+                embed_chapter_metadata(new, manga, chapter, self.settings, total, folder, overwrite=True)
+                done.append((old, new))
+                logging.info(f"Renamed {old} -> {os.path.basename(new)}")
+        return done
 
     def sync_all(self) -> None:
         for manga in self.db.get_manga_list():

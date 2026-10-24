@@ -23,7 +23,7 @@ from ..sites.base import ChapterInfo, ChapterUnavailable
 from .events import EventBus
 from .library import Library
 from .metadata_files import embed_chapter_metadata, write_folder_metadata
-from .models import ChapterKey, ChapterRef
+from .models import ChapterKey, ChapterRef, chapter_file_name
 from .paths import data_dir
 
 QUEUED, DOWNLOADING, DONE, FAILED, CANCELLED = 'queued', 'downloading', 'done', 'failed', 'cancelled'
@@ -399,6 +399,8 @@ class DownloadManager:
             self._emit_chapter(job, ref)
             return
 
+        if path and site_key != 'mangadex':          # MangaDex files carry their own naming
+            path = self.library.name_chapter_file(path, ref)
         if path:
             language = ref.language if site_key == 'mangadex' else None
             self.library.db.mark_chapter_downloaded(job.manga_id, ref.number, path, language=language)

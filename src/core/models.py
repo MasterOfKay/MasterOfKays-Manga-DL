@@ -54,6 +54,23 @@ def plain_text(text: str) -> str:
     return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 
+# Any number: Webtoon episode numbers are often one lower than our chapter numbers.
+_NUMBER_PREFIX = re.compile(r'^\s*(?:\[[^\]]*\]\s*)?(?:chapter|ch\.?|episode|ep\.?)\s*#?\d+(?:\.\d+)?\s*(?:[:\-–—.]\s*|$)',
+                            re.IGNORECASE)
+
+
+def chapter_title_only(name: str) -> str:
+    """'Ep. 1 - Chirp!' -> 'Chirp!', 'Episode 1' -> '' (no real name)."""
+    return _NUMBER_PREFIX.sub('', (name or '').strip()).strip()
+
+
+def chapter_file_name(number: str, name: str) -> str:
+    """'Chapter 1 - Chirp!.cbz' (or 'Chapter 1.cbz' without a name) - the Asura/Katana style."""
+    title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', chapter_title_only(name))
+    title = re.sub(r'\s+', ' ', title).strip(' .')[:120].strip()
+    return f"Chapter {number} - {title}.cbz" if title else f"Chapter {number}.cbz"
+
+
 def parse_utc(value: str):
     """'2026-10-24T01:40:02.04Z' -> aware datetime, None if empty/invalid."""
     if not value:
@@ -106,12 +123,7 @@ class ChapterRef:
     @property
     def display_name(self) -> str:
         """Chapter title without a redundant 'Chapter N' prefix."""
-        name = (self.name or '').strip()
-        if not name:
-            return ''
-        if re.fullmatch(rf'(chapter|ch\.?|episode|ep\.?)\s*{re.escape(self.number)}', name, re.IGNORECASE):
-            return ''
-        return re.sub(rf'^(chapter|ch\.?)\s*{re.escape(self.number)}\s*[:\-–]\s*', '', name, flags=re.IGNORECASE)
+        return chapter_title_only(self.name)
 
 
 @dataclass
