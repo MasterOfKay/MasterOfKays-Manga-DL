@@ -6,6 +6,7 @@ from .webtoon import WebtoonDownloader
 from .mangadex import MangaDexDownloader
 from .mangafreak import MangaFreakDownloader
 from .atsumaru import AtsumaruDownloader
+from .mangaball import MangaBallDownloader
 from .base import ComicSiteBase, ChapterInfo
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     'MangaDexDownloader',
     'MangaFreakDownloader',
     'AtsumaruDownloader',
+    'MangaBallDownloader',
     'ComicSiteBase',
     'ChapterInfo'
 ]

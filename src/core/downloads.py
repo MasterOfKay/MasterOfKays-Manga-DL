@@ -25,7 +25,7 @@ from ..sites.base import ChapterInfo, ChapterUnavailable, StorageUnavailable
 from .events import EventBus
 from .library import Library
 from .metadata_files import embed_chapter_metadata, write_folder_metadata
-from .models import ChapterKey, ChapterRef, chapter_file_name, is_novel_url
+from .models import MULTI_LANGUAGE_SITES, ChapterKey, ChapterRef, chapter_file_name, is_novel_url
 from .paths import data_dir
 
 QUEUED, DOWNLOADING, DONE, FAILED, CANCELLED = 'queued', 'downloading', 'done', 'failed', 'cancelled'
@@ -310,6 +310,56 @@ class DownloadManager:
         if failed:
             self.add(manga_id, failed)
 
+    def pause_all(self) -> None:
+        with self._lock:
+            for job in self._jobs:
+                if not job.finished and not job.paused:
+                    job.paused = job.user_paused = True
+                    if job.status == JOB_QUEUED:
+                        job.status = JOB_PAUSED
+            self._wake.notify_all()
+        self.bus.emit('queue_changed')
+
+    def resume_all(self) -> None:
+        with self._lock:
+            blocked = any(j.blocked for j in self._jobs)
+            for job in self._jobs:
+                if not job.finished and (job.paused or job.status == JOB_PAUSED):
+                    job.paused = job.user_paused = False
+                    if job.status == JOB_PAUSED:
+                        job.status = JOB_QUEUED
+            self._wake.notify_all()
+        if blocked:
+            self.resume_storage()       # also emits queue_changed
+        else:
+            self.bus.emit('queue_changed')
+
+    def failed_total(self) -> int:
+        """Failed chapters over all jobs (what 'Retry all' would queue again)."""
+        with self._lock:
+            return sum(sum(1 for c in j.chapters if j.states.get(c.key) == FAILED) for j in self._jobs)
+
+    def retry_all_failed(self) -> int:
+        """Queue every failed chapter of every job again. Returns how many."""
+        count = self.failed_total()
+        with self._lock:
+            ids = [j.id for j in self._jobs if any(j.states.get(c.key) == FAILED for c in j.chapters)]
+        for job_id in ids:
+            self._retry_failed_only(job_id)
+        return count
+
+    def _retry_failed_only(self, job_id: int) -> None:
+        with self._lock:
+            job = self._find(job_id)
+            if not job:
+                return
+            failed = [c for c in job.chapters if job.states.get(c.key) == FAILED]
+            manga_id = job.manga_id
+            if job.finished:
+                self._jobs.remove(job)
+        if failed:
+            self.add(manga_id, failed)
+
     def jobs(self) -> List[Job]:
         with self._lock:
             return list(self._jobs)
@@ -488,7 +538,7 @@ class DownloadManager:
             path = self.library.name_chapter_file(path, ref)
         if path:
             self._drop_replaced_file(ref, path, folder)
-            language = ref.language if site_key == 'mangadex' else None
+            language = ref.language if site_key in MULTI_LANGUAGE_SITES else None
             self.library.db.mark_chapter_downloaded(job.manga_id, ref.number, path, language=language)
             downloaded = [r for r in self.library.db.get_chapters_for_manga(job.manga_id) if r['is_downloaded']]
             chapter = {'number': ref.number, 'name': ref.display_name, 'language': ref.language, 'volume': ref.volume,

@@ -22,10 +22,14 @@ SITE_LABELS = {
     'mangadex': 'MangaDex',
     'mangafreak': 'MangaFreak',
     'atsumaru': 'Atsumaru',
+    'mangaball': 'MangaBall',
 }
 
 # Sites where one chapter can come from several release (scanlation) groups.
-GROUP_SITES = ('mangadex', 'atsumaru')
+GROUP_SITES = ('mangadex', 'atsumaru', 'mangaball')
+
+# Sites with chapters in several languages: the language is part of every chapter's identity.
+MULTI_LANGUAGE_SITES = ('mangadex', 'mangaball')
 
 # Formats a light novel chapter can be saved as: key -> (label, file extension).
 NOVEL_FORMATS = {

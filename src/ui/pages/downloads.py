@@ -260,8 +260,28 @@ class DownloadsPage(QWidget):
         al.addLayout(folder_row)
         col.addWidget(add)
 
-        # ---- sections
+        # ---- queue-wide actions
         col.addSpacing(10)
+        self.toolbar = QWidget(body)
+        tl = QHBoxLayout(self.toolbar)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(6)
+        tl.addStretch(1)
+        self.pause_all_btn = Button('Pause all', 'pause', None, self.toolbar)
+        self.pause_all_btn.setToolTip('Pause every download in the queue. MangaDex stops right away, '
+                                      'other sites after the chapter they are on.')
+        self.pause_all_btn.clicked.connect(self.core.downloads.pause_all)
+        self.resume_all_btn = Button('Resume all', 'play', 'primary', self.toolbar)
+        self.resume_all_btn.setToolTip('Continue every paused download')
+        self.resume_all_btn.clicked.connect(self.core.downloads.resume_all)
+        self.retry_all_btn = Button('Retry all failed', 'retry', 'danger', self.toolbar)
+        self.retry_all_btn.setToolTip('Queue every chapter that failed again, in all downloads')
+        self.retry_all_btn.clicked.connect(self._retry_all)
+        for b in (self.pause_all_btn, self.resume_all_btn, self.retry_all_btn):
+            tl.addWidget(b)
+        col.addWidget(self.toolbar)
+
+        # ---- sections
         self.active_label = label('NOW DOWNLOADING', 'section', body)
         col.addWidget(self.active_label)
         self.active_box = QVBoxLayout()
@@ -393,6 +413,24 @@ class DownloadsPage(QWidget):
         self.finished_label.setVisible(bool(finished))
         self.clear_btn.setVisible(bool(finished))
         self.empty.setVisible(not jobs)
+        self._update_toolbar(jobs)
+
+    def _update_toolbar(self, jobs=None) -> None:
+        jobs = self.core.downloads.jobs() if jobs is None else jobs
+        unfinished = [j for j in jobs if not j.finished]
+        paused = [j for j in unfinished if j.paused or j.status == JOB_PAUSED]
+        failed = self.core.downloads.failed_total()
+        self.pause_all_btn.setVisible(len(paused) < len(unfinished))
+        self.resume_all_btn.setVisible(bool(paused))
+        self.retry_all_btn.setText(f"Retry {failed} failed" if failed else 'Retry all failed')
+        self.retry_all_btn.setVisible(failed > 0)
+        self.toolbar.setVisible(bool(unfinished) or failed > 0)
+
+    def _retry_all(self) -> None:
+        count = self.core.downloads.retry_all_failed()
+        if count:
+            noun = 'chapter' if count == 1 else 'chapters'
+            self.toast.emit('Retrying', f"{count} failed {noun} queued again", 'info')
 
     def _on_progress(self, job_id: int) -> None:
         row = self._rows.get(job_id)
@@ -401,6 +439,7 @@ class DownloadsPage(QWidget):
         job = next((j for j in self.core.downloads.jobs() if j.id == job_id), None)
         if job:
             row.update_from(job)
+            self._update_toolbar()
 
 
 def change_novel_folder(parent: QWidget, core: AppCore, reset: bool = False) -> Optional[str]:

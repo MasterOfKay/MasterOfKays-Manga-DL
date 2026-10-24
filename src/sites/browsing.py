@@ -508,7 +508,87 @@ class AtsumaruBrowser(SiteBrowser):
                           status=(doc.get('status') or '').lower(), genres=list(doc.get('tags') or []))
 
 
-BROWSERS = [KatanaBrowser, AsuraBrowser, MangaDexBrowser, WebtoonBrowser, MangaFreakBrowser, AtsumaruBrowser]
+# --------------------------------------------------------------------- MangaBall
+class MangaBallBrowser(SiteBrowser):
+    key, label = 'mangaball', 'MangaBall'
+    api = 'https://api.mangaball.com/api/v1'
+    language = 'en'                  # latest updates: titles with new chapters in this language
+    _groups = ('genre', 'theme')
+    _skip = {'adult', 'hentai', 'smut', 'mature', 'sexual violence'}     # adult titles are filtered out anyway
+
+    def __init__(self):
+        super().__init__()
+        self.session.headers.update({'Origin': 'https://mangaball.com', 'Referer': 'https://mangaball.com/'})
+
+    def _json(self, method: str, path: str, **kwargs) -> dict:
+        response = self.session.request(method, f'{self.api}/{path}', timeout=30, **kwargs)
+        response.raise_for_status()
+        return response.json()
+
+    def genres(self):
+        cached = self.cache.get('genres')
+        if cached:
+            return cached
+        grouped = self._json('GET', 'tag/get-grouped').get('data') or {}
+        found = {t['name']: t.get('id') or t.get('_id') for group in self._groups for t in grouped.get(group) or []
+                 if t.get('name') and (t.get('id') or t.get('_id')) and t['name'].lower() not in self._skip}
+        result = sorted(found.items(), key=lambda x: x[0].lower())
+        self.cache.put('genres', result)
+        return result
+
+    def browse(self, query='', genre_slug='', page=1):
+        params = {'page': page, 'limit': PAGE_SIZE, 'adult_mode': 'no_18'}
+        if not query and not genre_slug:
+            if self.language:
+                params['chapterLanguage'] = self.language
+            data = self._json('GET', 'title/recently-updated', params=params)
+        else:
+            if query:
+                params['keyword'] = query.strip()
+            if genre_slug:
+                params['included_tags'] = genre_slug
+            data = self._json('GET', 'title/search-advanced', params=params)
+        pages = (data.get('pagination') or {}).get('total_pages') or 0
+        items = [self._item(t) for t in data.get('data') or [] if t.get('id') and not t.get('is18plus')]
+        return [i for i in items if i], page < pages
+
+    def _item(self, title) -> Optional[BrowseItem]:
+        from .mangaball import cover_url
+        if not title.get('name'):
+            return None
+        latest = ''
+        recent = [c for c in title.get('recent_chapters') or [] if c.get('lang') == (self.language or c.get('lang'))]
+        if recent:
+            number = recent[0].get('number')
+            when = _ago(recent[0].get('created_at') or '')
+            if number is not None:
+                latest = f"Chapter {number:g}" if isinstance(number, float) else f"Chapter {number}"
+                latest += f" · {when}" if when else ''
+        elif title.get('chapters_count'):
+            latest = f"{title['chapters_count']} chapters"
+        return BrowseItem(title=title['name'], url=f"https://mangaball.com/title-detail/{title['id']}", site=self.key,
+                          cover_url=cover_url(title.get('image')), latest=latest,
+                          status=(title.get('status') or '').lower(),
+                          genres=[t['name'] for t in title.get('tags') or []
+                                  if t.get('name') and t.get('group') in self._groups])
+
+
+def _ago(stamp: str) -> str:
+    """'2026-10-23T20:14:15.244000' (UTC) -> '5 h ago'"""
+    from datetime import datetime, timezone
+    try:
+        then = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+    except ValueError:
+        return ''
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    minutes = max(0, int((datetime.now(timezone.utc) - then).total_seconds() // 60))
+    return (f"{minutes} min ago" if minutes < 60 else f"{minutes // 60} h ago" if minutes < 1440
+            else f"{minutes // 1440} d ago")
+
+
+BROWSERS = [KatanaBrowser, AsuraBrowser, MangaDexBrowser, WebtoonBrowser, MangaFreakBrowser, AtsumaruBrowser,
+            MangaBallBrowser]
 
 REFERERS = {
     'mangakatana': 'https://mangakatana.com/',
@@ -517,5 +597,6 @@ REFERERS = {
     'mangadex': 'https://mangadex.org/',
     'mangafreak': 'https://ww3.mangafreak.me/',
     'atsumaru': 'https://atsu.moe/',
+    'mangaball': 'https://mangaball.com/',
 }
 

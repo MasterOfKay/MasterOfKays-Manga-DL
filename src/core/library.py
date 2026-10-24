@@ -18,12 +18,12 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from ..managers.database_manager import DatabaseManager, ChapterData, MangaMetadata as DBMetadata
-from ..sites import (AsuraComicsDownloader, AtsumaruDownloader, MangaDexDownloader, MangaFreakDownloader,
-                     MangaKatanaDownloader, WebtoonDownloader)
+from ..sites import (AsuraComicsDownloader, AtsumaruDownloader, MangaBallDownloader, MangaDexDownloader,
+                     MangaFreakDownloader, MangaKatanaDownloader, WebtoonDownloader)
 from ..sites.base import ChapterInfo, ComicSiteBase
 from .events import EventBus
-from .models import (ChapterRef, ChapterSource, FetchedManga, chapter_file_name, chapter_sort_key, fix_text,
-                     is_novel_url, pick_source, plain_text)
+from .models import (MULTI_LANGUAGE_SITES, ChapterRef, ChapterSource, FetchedManga, chapter_file_name,
+                     chapter_sort_key, fix_text, is_novel_url, pick_source, plain_text)
 from .paths import covers_dir, sanitize_folder_name
 
 # Covers saved by older versions: Webtoon's transparent banner layer, MangaDex's small thumbnail.
@@ -115,6 +115,7 @@ class Library:
             'mangadex': MangaDexDownloader(),
             'mangafreak': MangaFreakDownloader(),
             'atsumaru': AtsumaruDownloader(),
+            'mangaball': MangaBallDownloader(),
         }
         self._folder_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
         self._folder_lock = threading.Lock()
@@ -209,7 +210,7 @@ class Library:
         return fixed
 
     def supported_sites(self) -> List[str]:
-        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak', 'Atsumaru']
+        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak', 'Atsumaru', 'MangaBall']
 
     # ---------------------------------------------------------------- folders
     def download_root(self, novel: bool = False) -> str:
@@ -360,13 +361,13 @@ class Library:
 
         new_refs: List[ChapterRef] = []
         for language, refs in fetched.items():
-            interesting = not first_scan and (key != 'mangadex' or language in followed)
+            interesting = not first_scan and (key not in MULTI_LANGUAGE_SITES or language in followed)
             inserted = self.db.merge_chapters(manga_id, [self._chapter_data(r) for r in refs], mark_new=interesting)
             if interesting:
                 inserted_keys = {(c.language, c.chapter_number) for c in inserted}
                 new_refs.extend(r for r in refs if r.key in inserted_keys)
 
-        if key == 'mangadex':
+        if key in MULTI_LANGUAGE_SITES:
             # MangaDex deletes chapters (takedowns, re-uploads under a new id). The API always
             # returns the full list, so anything not in it is gone - downloaded files are kept.
             listed = {r.key for refs in fetched.values() for r in refs}
@@ -427,7 +428,7 @@ class Library:
         if not os.path.isdir(self.download_root(is_novel_url(manga.get('url', '')))):
             return 0        # e.g. network share offline - never reset anything then
         folder = self.folder_of(manga)
-        is_mangadex = manga.get('site_type') == 'mangadex'
+        is_mangadex = manga.get('site_type') in MULTI_LANGUAGE_SITES     # chapters are per language
         if not os.path.isdir(folder):
             # Nothing of this manga is in the library folder (yet).
             changed = 0
@@ -555,7 +556,8 @@ class Library:
                 new = self.name_chapter_file(old, ref)
                 if new == old:
                     continue
-                self.db.mark_chapter_downloaded(manga['id'], ref.number, new, language=None)
+                language = ref.language if manga.get('site_type') in MULTI_LANGUAGE_SITES else None
+                self.db.mark_chapter_downloaded(manga['id'], ref.number, new, language=language)
                 chapter = {'number': ref.number, 'name': ref.display_name, 'language': ref.language,
                            'volume': ref.volume, 'is_first': ref.number == first}
                 embed_chapter_metadata(new, manga, chapter, self.settings, total, folder, overwrite=True)
@@ -591,6 +593,8 @@ class Library:
                 headers['Referer'] = 'https://atsu.moe/'
             elif 'mangafreak' in cover_url:
                 headers['Referer'] = 'https://ww3.mangafreak.me/'
+            elif 'mangaball' in cover_url or 'poke-black-and-white' in cover_url:
+                headers['Referer'] = 'https://mangaball.com/'
             response = requests.get(cover_url, headers=headers, timeout=30)
             response.raise_for_status()
             with open(path, 'wb') as f:
