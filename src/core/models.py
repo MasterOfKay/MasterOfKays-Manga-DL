@@ -23,6 +23,7 @@ SITE_LABELS = {
     'mangafreak': 'MangaFreak',
     'atsumaru': 'Atsumaru',
     'mangaball': 'MangaBall',
+    'weebcentral': 'Weeb Central',
 }
 
 # Sites where one chapter can come from several release (scanlation) groups.

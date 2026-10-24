@@ -7,6 +7,7 @@ from .mangadex import MangaDexDownloader
 from .mangafreak import MangaFreakDownloader
 from .atsumaru import AtsumaruDownloader
 from .mangaball import MangaBallDownloader
+from .weebcentral import WeebCentralDownloader
 from .base import ComicSiteBase, ChapterInfo
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     'MangaFreakDownloader',
     'AtsumaruDownloader',
     'MangaBallDownloader',
+    'WeebCentralDownloader',
     'ComicSiteBase',
     'ChapterInfo'
 ]

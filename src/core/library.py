@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from ..managers.database_manager import DatabaseManager, ChapterData, MangaMetadata as DBMetadata
-from ..sites import (AsuraComicsDownloader, AtsumaruDownloader, MangaBallDownloader, MangaDexDownloader,
+from ..sites import (AsuraComicsDownloader, AtsumaruDownloader, MangaBallDownloader, MangaDexDownloader, WeebCentralDownloader,
                      MangaFreakDownloader, MangaKatanaDownloader, WebtoonDownloader)
 from ..sites.base import ChapterInfo, ComicSiteBase
 from .events import EventBus
@@ -116,6 +116,7 @@ class Library:
             'mangafreak': MangaFreakDownloader(),
             'atsumaru': AtsumaruDownloader(),
             'mangaball': MangaBallDownloader(),
+            'weebcentral': WeebCentralDownloader(),
         }
         self._folder_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
         self._folder_lock = threading.Lock()
@@ -210,7 +211,7 @@ class Library:
         return fixed
 
     def supported_sites(self) -> List[str]:
-        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak', 'Atsumaru', 'MangaBall']
+        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak', 'Atsumaru', 'MangaBall', 'Weeb Central']
 
     # ---------------------------------------------------------------- folders
     def download_root(self, novel: bool = False) -> str:

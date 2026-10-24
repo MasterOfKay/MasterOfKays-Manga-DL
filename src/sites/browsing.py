@@ -587,8 +587,79 @@ def _ago(stamp: str) -> str:
             else f"{minutes // 1440} d ago")
 
 
+# ------------------------------------------------------------------ Weeb Central
+class WeebCentralBrowser(SiteBrowser):
+    key, label = 'weebcentral', 'Weeb Central'
+    base = 'https://weebcentral.com'
+    _adult = {'Adult', 'Hentai', 'Lolicon', 'Shotacon', 'Smut', 'Mature', 'Ecchi'}
+
+    def genres(self):
+        cached = self.cache.get('genres')
+        if cached:
+            return cached
+        soup, _ = self._soup(f'{self.base}/search')
+        names = {i['value'] for i in soup.find_all('input', id=re.compile(r'^tag-.+-value$')) if i.get('value')}
+        result = sorted(((n, n) for n in names - self._adult), key=lambda x: x[0].lower())
+        self.cache.put('genres', result)
+        return result
+
+    def browse(self, query='', genre_slug='', page=1):
+        if not query and not genre_slug:
+            soup, _ = self._soup(f'{self.base}/latest-updates/{page}')
+            items = [self._latest_item(a) for a in soup.find_all('article', recursive=False)]
+            more = bool(soup.find(attrs={'hx-get': re.compile(rf'/latest-updates/{page + 1}$')}))
+            return [i for i in items if i], more
+        limit = 32
+        params = {'text': query.strip(), 'sort': 'Best Match' if query else 'Popularity', 'order': 'Descending',
+                  'official': 'Any', 'anime': 'Any', 'adult': 'False', 'display_mode': 'Full Display',
+                  'limit': limit, 'offset': (page - 1) * limit}
+        if genre_slug:
+            params['included_tag'] = genre_slug
+        soup, _ = self._soup(f'{self.base}/search/data', **params)
+        items = [self._search_item(a) for a in soup.select('article.bg-base-300')]
+        more = bool(soup.find(attrs={'hx-get': re.compile(r'offset=')}))
+        return [i for i in items if i], more
+
+    def _latest_item(self, it) -> Optional[BrowseItem]:
+        link = it.find('a', href=re.compile(r'^/series/'))
+        if not link:
+            return None
+        chapter = it.select_one('a[href^="/chapters/"] span')
+        when = it.find('time')
+        img = it.find('img', src=re.compile(r'/cover/'))
+        status = it.find('img', src=re.compile(r'icon-(ongoing|complete)'))
+        latest = ' · '.join(x for x in (chapter.get_text(strip=True) if chapter else '',
+                                         _ago(when['datetime']) if when and when.get('datetime') else '') if x)
+        return BrowseItem(title=it.get('data-tip') or (img.get('alt', '').removesuffix(' cover') if img else ''),
+                          url=self.base + link['href'], site=self.key, cover_url=img['src'] if img else '',
+                          latest=latest,
+                          status=('completed' if 'complete' in status['src'] else 'ongoing') if status else '')
+
+    def _search_item(self, it) -> Optional[BrowseItem]:
+        link = it.find('a', href=re.compile(r'/series/'))
+        if not link:
+            return None
+        sections = it.find_all('section', recursive=False)
+        info = sections[-1] if sections else it
+        fields = {}
+        for div in info.find_all('div', recursive=False):
+            text = div.get_text(' ', strip=True)
+            if ':' in text:
+                key, value = text.split(':', 1)
+                fields[key.strip().lower()] = value.strip()
+        title = info.find('div', recursive=False)
+        img = it.find('img', src=re.compile(r'/cover/'))
+        status = fields.get('status', '').lower()
+        href = link['href']
+        return BrowseItem(title=title.get_text(' ', strip=True) if title else '',
+                          url=href if href.startswith('http') else self.base + href, site=self.key,
+                          cover_url=img['src'] if img else '',
+                          status={'complete': 'completed', 'canceled': 'cancelled'}.get(status, status),
+                          genres=[g.strip() for g in fields.get('tag(s)', '').split(',') if g.strip()])
+
+
 BROWSERS = [KatanaBrowser, AsuraBrowser, MangaDexBrowser, WebtoonBrowser, MangaFreakBrowser, AtsumaruBrowser,
-            MangaBallBrowser]
+            MangaBallBrowser, WeebCentralBrowser]
 
 REFERERS = {
     'mangakatana': 'https://mangakatana.com/',
@@ -598,5 +669,6 @@ REFERERS = {
     'mangafreak': 'https://ww3.mangafreak.me/',
     'atsumaru': 'https://atsu.moe/',
     'mangaball': 'https://mangaball.com/',
+    'weebcentral': 'https://weebcentral.com/',
 }
 
