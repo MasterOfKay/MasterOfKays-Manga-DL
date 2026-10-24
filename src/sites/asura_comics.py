@@ -25,7 +25,7 @@ from urllib.parse import quote_plus, urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from .base import ChapterUnavailable, ComicSiteBase, MangaMetadata
+from .base import ChapterUnavailable, ComicSiteBase, MangaMetadata, save_file
 
 BASE = "https://asurascans.com"
 _NEW_SERIES = re.compile(r'^https?://(?:www\.)?asurascans\.com/comics/([a-z0-9][a-z0-9\-_]*)/?(?:[?#].*)?$', re.I)
@@ -374,8 +374,5 @@ class AsuraComicsDownloader(ComicSiteBase):
                 if progress_callback:
                     progress_callback(index, total)
 
-        tmp = cbz_path + '.part'
-        with open(tmp, 'wb') as f:
-            f.write(buffer.getvalue())
-        os.replace(tmp, cbz_path)
+        save_file(cbz_path, buffer.getvalue())
         return cbz_path

@@ -344,6 +344,14 @@ class Library:
                 inserted_keys = {(c.language, c.chapter_number) for c in inserted}
                 new_refs.extend(r for r in refs if r.key in inserted_keys)
 
+        if key == 'mangadex':
+            # MangaDex deletes chapters (takedowns, re-uploads under a new id). The API always
+            # returns the full list, so anything not in it is gone - downloaded files are kept.
+            listed = {r.key for refs in fetched.values() for r in refs}
+            removed = self.db.remove_missing_chapters(manga_id, listed)
+            if removed:
+                logging.info(f"{manga['title']}: removed {removed} chapters that are no longer on MangaDex")
+
         if with_metadata or self._needs_metadata(manga):
             try:
                 self._refresh_metadata(manga, site)

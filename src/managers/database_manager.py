@@ -469,6 +469,21 @@ class DatabaseManager:
             raise
         return inserted
 
+    def remove_missing_chapters(self, manga_id: int, keep: set) -> int:
+        """Delete chapters that are not downloaded and no longer listed on the site.
+        `keep` holds (language, chapter_number) of everything the site lists. Returns the count."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute('SELECT id, language, chapter_number FROM chapters '
+                                    'WHERE manga_id = ? AND is_downloaded = 0', (manga_id,)).fetchall()
+                gone = [r[0] for r in rows if (r[1], r[2]) not in keep]
+                conn.executemany('DELETE FROM chapters WHERE id = ?', [(i,) for i in gone])
+                conn.commit()
+                return len(gone)
+        except Exception as e:
+            logging.error(f"Error removing missing chapters for manga ID {manga_id}: {e}")
+            return 0
+
     def update_manga_description(self, manga_id: int, description: str) -> None:
         try:
             with self._connect() as conn:

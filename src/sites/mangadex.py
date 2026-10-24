@@ -6,6 +6,7 @@ import requests
 import json
 import time
 import os
+import io
 import zipfile
 import logging
 from typing import List, Tuple, Optional, Callable, Union, Dict
@@ -13,7 +14,7 @@ import re
 from urllib.parse import urljoin, urlparse, parse_qs
 from datetime import datetime
 
-from .base import ComicSiteBase, MangaMetadata, ChapterInfo
+from .base import ComicSiteBase, MangaMetadata, ChapterInfo, ChapterUnavailable, StorageUnavailable, save_file
 
 
 class MangaDexDownloader(ComicSiteBase):
@@ -327,7 +328,8 @@ class MangaDexDownloader(ComicSiteBase):
                 
                 data = response.json()
                 if data.get('result') != 'ok':
-                    break
+                    # Never return a partial list: the library drops chapters that are missing from it.
+                    raise RuntimeError(f"MangaDex returned an error for offset {params['offset']}")
                 
                 chapters = data.get('data', [])
                 if not chapters:
@@ -409,6 +411,9 @@ class MangaDexDownloader(ComicSiteBase):
             
             at_home_url = f"{self.api_base}/at-home/server/{chapter_id}"
             response = self._session.get(at_home_url, timeout=15)
+            if response.status_code == 404:
+                raise ChapterUnavailable("This chapter was removed from MangaDex. "
+                                         "Use 'Check for new' to refresh the chapter list.")
             response.raise_for_status()
             
             at_home_data = response.json()
@@ -471,31 +476,34 @@ class MangaDexDownloader(ComicSiteBase):
                 
                 page_url = f"{base_url}/data/{chapter_hash}/{page_filename}"
                 
-                try:
-                    page_response = self._session.get(page_url, timeout=30)
-                    page_response.raise_for_status()
-                    
-                    downloaded_images.append((page_filename, page_response.content))
-                    time.sleep(0.1)  # Rate limiting
-                    
-                except Exception as e:
-                    print(f"Error downloading page {i + 1}: {e}")
-                    continue
-            
-            if not downloaded_images:
-                return {"success": False, "error": "Failed to download any pages"}
-            
-            with zipfile.ZipFile(cbz_path, 'w', zipfile.ZIP_STORED) as zipf:
+                # A missing page fails the chapter (it is retried) instead of saving an incomplete file.
+                for attempt in range(3):
+                    try:
+                        page_response = self._session.get(page_url, timeout=30)
+                        page_response.raise_for_status()
+                        downloaded_images.append((page_filename, page_response.content))
+                        break
+                    except requests.RequestException as e:
+                        if attempt == 2:
+                            raise RuntimeError(f"Page {i + 1} failed to download: {e}") from e
+                        time.sleep(1 + attempt)
+                time.sleep(0.1)  # Rate limiting
+
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_STORED) as zipf:
                 for page_filename, page_content in downloaded_images:
                     zipf.writestr(page_filename, page_content)
-            
+            save_file(cbz_path, buffer.getvalue())
+
             self.manga_metadata(manga_path, manga_name, getattr(self, 'current_url', ''))
             
             if progress_callback:
                 progress_callback(total_pages, total_pages, f"Created CBZ: {filename}")
             
             return {"success": True, "path": cbz_path}
-            
+
+        except (ChapterUnavailable, StorageUnavailable):
+            raise
         except Exception as e:
             error_msg = f"Error downloading chapter: {e}"
             print(error_msg)

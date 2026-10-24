@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib.parse import urljoin
 
-from .base import ComicSiteBase
+from .base import ComicSiteBase, save_file
 
 import logging
 logger = logging.getLogger(__name__)
@@ -490,10 +490,7 @@ class WebtoonDownloader(ComicSiteBase):
                 for idx, (url, data) in enumerate(zip(urls, pages), 1):
                     ext = os.path.splitext(url.split('?')[0])[1].lower() or '.jpg'
                     cbz.writestr(f"{idx:03d}{ext}", data)
-            part = cbz_path + '.part'
-            with open(part, 'wb') as f:
-                f.write(buffer.getvalue())
-            os.replace(part, cbz_path)
+            save_file(cbz_path, buffer.getvalue())
             return cbz_path
 
         except Exception as e:

@@ -8,11 +8,12 @@ from typing import List, Tuple, Dict, Union, Optional, Callable
 import os
 import re
 import time
+import io
 import zipfile
 import json
 import logging
 
-from .base import ComicSiteBase
+from .base import ComicSiteBase, StorageUnavailable, save_file
 
 logger = logging.getLogger(__name__)
 
@@ -378,63 +379,43 @@ class MangaKatanaDownloader(ComicSiteBase):
             total_images = len(image_urls)
             if progress_callback:
                 progress_callback(0, total_images)
-            with zipfile.ZipFile(cbz_path, 'w') as cbz:
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as cbz:
                 for idx, img_url in enumerate(image_urls, 1):
-                    try:
-                        img_downloaded = False
-                        for img_attempt in range(3):
-                            try:
-                                img_response = session.get(img_url, timeout=15)
-                                img_response.raise_for_status()
-                                
-                                if len(img_response.content) < 1000:  # Skip very small images
-                                    logger.warning(f"Image {idx} too small ({len(img_response.content)} bytes), skipping")
-                                    break
-                                
-                                img_filename = f"{idx:03d}.jpg"
-                                cbz.writestr(img_filename, img_response.content)
-                                successful_downloads += 1
-                                img_downloaded = True
-                                logger.debug(f"Downloaded image {idx}/{total_images} ({len(img_response.content)} bytes)")
-                                if progress_callback:
-                                    progress_callback(idx, total_images)
-                                break
-                            except Exception as e:
-                                if img_attempt < 2:
-                                    logger.warning(f"Error downloading image {idx}, attempt {img_attempt+1}: {e}")
-                                    time.sleep(2)
-                                else:
-                                    logger.error(f"Failed to download image {idx} after 3 attempts: {e}")
-                        
-                        if not img_downloaded:
-                            logger.warning(f"Could not download image {idx}, continuing with next")
-                    except Exception as img_error:
-                        logger.error(f"Error processing image {idx}: {img_error}")
-            
-            if not os.path.exists(cbz_path) or os.path.getsize(cbz_path) < 1000:
-                logger.error(f"CBZ file is too small or missing (size: {os.path.getsize(cbz_path) if os.path.exists(cbz_path) else 0} bytes)")
-                if os.path.exists(cbz_path):
-                    os.remove(cbz_path)
-                return {"path": "", "url": chapter_url, "success": False}
-            
+                    for img_attempt in range(3):
+                        try:
+                            img_response = session.get(img_url, timeout=15)
+                            img_response.raise_for_status()
+                        except Exception as e:
+                            if img_attempt == 2:
+                                # Fail the chapter (it is retried) instead of saving it with pages missing.
+                                raise RuntimeError(f"Image {idx} failed to download: {e}") from e
+                            logger.warning(f"Error downloading image {idx}, attempt {img_attempt+1}: {e}")
+                            time.sleep(2)
+                            continue
+                        if len(img_response.content) < 1000:  # Skip very small images
+                            logger.warning(f"Image {idx} too small ({len(img_response.content)} bytes), skipping")
+                        else:
+                            cbz.writestr(f"{idx:03d}.jpg", img_response.content)
+                            successful_downloads += 1
+                        if progress_callback:
+                            progress_callback(idx, total_images)
+                        break
+
             if successful_downloads == 0:
                 logger.error("No images were successfully downloaded")
-                if os.path.exists(cbz_path):
-                    os.remove(cbz_path)
-                return {"path": "", "url": chapter_url, "success": False}
-            
-            logger.info(f"Successfully downloaded {successful_downloads}/{len(image_urls)} images")
-                
-            logger.info(f"Successfully created CBZ for chapter {chapter_num}")
+                return {"path": "", "url": chapter_url, "success": False, "error": "No images could be downloaded"}
+
+            save_file(cbz_path, buffer.getvalue())
+            logger.info(f"Successfully created CBZ for chapter {chapter_num} ({successful_downloads}/{total_images} images)")
             return {"path": cbz_path, "url": chapter_url, "success": True}
 
+        except StorageUnavailable:
+            raise
         except Exception as e:
             logger.exception(f"Error downloading chapter {chapter_num}: {e}")
-            cbz_path = os.path.join(self.get_safe_manga_path(manga_name, base_path), f"Chapter {chapter_num}.cbz")
-            if os.path.exists(cbz_path):
-                os.remove(cbz_path)
-            return {"path": "", "url": chapter_url, "success": False}
-    
+            return {"path": "", "url": chapter_url, "success": False, "error": str(e)}
+
     def check_for_updates(self, manga_url: str, current_chapters: List[str]) -> List[Tuple[str, str, str]]:
         """Check if there are new chapters available."""
         try:

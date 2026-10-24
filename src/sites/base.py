@@ -34,6 +34,26 @@ class ChapterUnavailable(Exception):
     Retrying immediately won't help, so the download queue gives up on it at once."""
 
 
+class StorageUnavailable(OSError):
+    """The download folder can't be reached (e.g. network share offline)."""
+
+
+def save_file(path: str, data: bytes) -> None:
+    """Write through '<path>.part' so a full or vanished drive never leaves a broken
+    file behind that would later count as an already downloaded chapter."""
+    part = path + '.part'
+    try:
+        with open(part, 'wb') as f:
+            f.write(data)
+        os.replace(part, path)
+    except OSError:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+
+
 class ChapterInfo:
     """Enhanced chapter information structure for complex sites like MangaDex."""
     def __init__(self):
@@ -169,8 +189,11 @@ class ComicSiteBase(ABC):
         if not safe_name:
             safe_name = manga_name
         
-        if base_path is None or not os.path.isdir(base_path):
+        if base_path is None:
             base_path = os.getcwd()
+        elif not os.path.isdir(base_path):
+            # Never fall back to the working directory: chapters would silently land in the app folder.
+            raise StorageUnavailable(f"The download folder can't be reached: {base_path}")
         
         return self.ensure_directory(os.path.join(base_path, safe_name))
     

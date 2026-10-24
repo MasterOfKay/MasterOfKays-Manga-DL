@@ -10,7 +10,8 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLineEdit, QProgressBar, QScrollArea, QVBoxLayout, QWidget)
 
 from ...core import AppCore
-from ...core.downloads import (JOB_CANCELLED, JOB_DONE, JOB_FAILED, JOB_PAUSED, JOB_QUEUED, JOB_RUNNING, Job)
+from ...core.downloads import (JOB_CANCELLED, JOB_DONE, JOB_FAILED, JOB_PAUSED, JOB_QUEUED, JOB_RUNNING,
+                               STORAGE_OFFLINE, Job)
 from ...core.models import site_label
 from .. import icons, theme
 from ..bridge import Bridge
@@ -83,7 +84,7 @@ class JobRow(Card):
         self.pause_btn.clicked.connect(self._toggle_pause)
         self.retry_btn = Button('Retry', 'retry', 'danger', self)
         self.retry_btn.setStyleSheet('padding: 4px 10px;')
-        self.retry_btn.clicked.connect(lambda: self.core.downloads.retry_failed(self.job_id))
+        self.retry_btn.clicked.connect(self._retry)
         self.cancel_btn = IconButton('x', 'Cancel', self)
         self.cancel_btn.clicked.connect(self._cancel_or_remove)
         for b in (self.chapters_btn, self.pause_btn, self.retry_btn, self.cancel_btn):
@@ -96,6 +97,7 @@ class JobRow(Card):
     def update_from(self, job: Job) -> None:
         total, done, failed = job.total, job.done_count, job.failed_count
         finished = job.finished
+        storage = self.core.downloads.storage_error()
         percent = job.percent
         self.bar.setValue(int(percent * 10))
         tone = 'success' if job.status == JOB_DONE and not failed else None
@@ -109,8 +111,12 @@ class JobRow(Card):
             text = f"Chapter {job.current.number} · {done} of {total} done"
         elif job.status == JOB_RUNNING:
             text = f"Starting · {total} chapters"
+        elif job.blocked:
+            text = f"{job.blocked} · {done} of {total} done"
         elif job.status == JOB_PAUSED:
             text = f"Paused · {done} of {total} done"
+        elif job.status == JOB_QUEUED and storage:
+            text = f"Waiting for the download folder · {total} chapter{'s' if total != 1 else ''}"
         elif job.status == JOB_QUEUED:
             text = f"Waiting · {total} chapter{'s' if total != 1 else ''}"
         elif job.status == JOB_DONE:
@@ -122,6 +128,10 @@ class JobRow(Card):
         if failed and job.status not in (JOB_FAILED,):
             text += f" · {failed} failed"
         self.status.setText(f"{site_label(job.site_type)}  ·  {text}")
+        role = 'error' if job.blocked else 'muted'
+        if self.status.property('role') != role:
+            self.status.setProperty('role', role)
+            restyle(self.status)
         self.percent.setText('' if job.status in (JOB_QUEUED,) else f"{int(percent)}%")
 
         if self.big:
@@ -138,14 +148,26 @@ class JobRow(Card):
         self.pause_btn.setVisible(not finished)
         self.pause_btn.set_icon_name('play' if paused else 'pause', 'Resume' if paused else 'Pause')
         retryable = failed if failed else (total - done if job.status == JOB_CANCELLED else 0)
-        self.retry_btn.setVisible(retryable > 0)
+        self.retry_btn.setVisible(retryable > 0 or bool(job.blocked))
         self.retry_btn.setText(f"Retry {retryable} failed" if failed else f"Resume {retryable}")
-        if failed:
+        if job.blocked:
+            offline = bool(storage) and storage[0] == STORAGE_OFFLINE
+            self.retry_btn.setText('Retry' if offline else 'Continue')
+            self.retry_btn.setToolTip("Try again now (this also happens by itself every 30 seconds)" if offline
+                                      else "Continue downloading once you have freed up space")
+        elif failed:
             reasons = sorted(set(job.errors.values()))
             self.retry_btn.setToolTip('Why it failed:\n' + '\n'.join(f'• {r}' for r in reasons[:5]))
         else:
             self.retry_btn.setToolTip('Queue the chapters that were cancelled again')
         self.cancel_btn.set_icon_name('x', 'Remove from list' if finished else 'Cancel download')
+
+    def _retry(self) -> None:
+        job = next((j for j in self.core.downloads.jobs() if j.id == self.job_id), None)
+        if job and job.blocked:
+            self.core.downloads.resume_storage()
+        else:
+            self.core.downloads.retry_failed(self.job_id)
 
     def _toggle_pause(self) -> None:
         job = next((j for j in self.core.downloads.jobs() if j.id == self.job_id), None)

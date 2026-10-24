@@ -14,12 +14,14 @@ import itertools
 import json
 import logging
 import os
+import re
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from ..sites.base import ChapterInfo, ChapterUnavailable
+from ..sites.base import ChapterInfo, ChapterUnavailable, StorageUnavailable
 from .events import EventBus
 from .library import Library
 from .metadata_files import embed_chapter_metadata, write_folder_metadata
@@ -32,6 +34,26 @@ JOB_DONE, JOB_FAILED, JOB_CANCELLED = 'done', 'failed', 'cancelled'
 FINISHED_STATES = (JOB_DONE, JOB_FAILED, JOB_CANCELLED)
 
 _ids = itertools.count(1)
+
+# Storage problems stop the whole queue (every job writes to the same place) until they are fixed.
+STORAGE_OFFLINE, STORAGE_FULL = 'offline', 'full'
+MIN_FREE_BYTES = 100 * 1024 * 1024
+_DISK_FULL = re.compile(r'Errno 28\]|No space left|WinError (112|39)\]|not enough space|disk is full', re.I)
+
+
+def storage_problem(root: str, error: str = '') -> Optional[Tuple[str, str]]:
+    """(kind, message) when the download folder is unreachable or (nearly) full, else None."""
+    if not os.path.isdir(root):
+        return STORAGE_OFFLINE, f"The download folder can't be reached: {root}"
+    try:
+        free = shutil.disk_usage(root).free
+    except OSError:
+        free = None
+    if (free is not None and free < MIN_FREE_BYTES) or _DISK_FULL.search(error or ''):
+        # A share can report free space but still refuse writes (quota) - only show small numbers.
+        left = f" ({free / 1024 ** 2:.0f} MB left)" if free is not None and free < 1024 ** 3 else ''
+        return STORAGE_FULL, f"The drive is full{left}"
+    return None
 
 
 @dataclass
@@ -53,6 +75,7 @@ class Job:
     paused: bool = False
     user_paused: bool = False        # paused by the user (not just for closing the app)
     cancelled: bool = False
+    blocked: str = ''                # stopped by a storage problem (drive offline/full) - the message
 
     @property
     def total(self) -> int:
@@ -91,6 +114,7 @@ class DownloadManager:
         self._stopping = False
         self._draining = False           # closing: finish the current chapter, start nothing new
         self._restoring = False
+        self._storage: Optional[Tuple[str, str]] = None    # (kind, message) while the queue is stopped
         self._save_lock = threading.Lock()
         self.queue_file = os.path.join(data_dir(), 'queue.json')
         self._thread = threading.Thread(target=self._run, name="downloader", daemon=True)
@@ -220,7 +244,29 @@ class DownloadManager:
         self._set_paused(job_id, True)
 
     def resume(self, job_id: int) -> None:
+        with self._lock:
+            job = self._find(job_id)
+            blocked = bool(job and job.blocked)
         self._set_paused(job_id, False)
+        if blocked:
+            self.resume_storage()
+
+    def storage_error(self) -> Optional[Tuple[str, str]]:
+        with self._lock:
+            return self._storage
+
+    def resume_storage(self) -> None:
+        """Continue after the drive is back / has space again. If it still isn't fixed
+        the queue simply stops again at the next chapter."""
+        with self._lock:
+            self._storage = None
+            for job in self._jobs:
+                if job.blocked:
+                    job.blocked = ''
+                    if job.status == JOB_PAUSED and not job.paused:
+                        job.status = JOB_QUEUED
+            self._wake.notify_all()
+        self.bus.emit('queue_changed')
 
     def chapter_error(self, manga_id: int, key: ChapterKey) -> str:
         with self._lock:
@@ -288,13 +334,18 @@ class DownloadManager:
     # Worker thread: pick the next job and download its chapters one by one. The UI is notified of all changes.
     def _run(self) -> None:
         while True:
+            storage = self.storage_error()
+            if storage and storage[0] == STORAGE_OFFLINE and not storage_problem(self.library.download_root()):
+                logging.info("The download folder is reachable again - continuing")
+                self.resume_storage()      # a full drive waits for the user instead
             with self._lock:
-                job = self._next_job()
-                while job is None and not self._stopping:
-                    self._wake.wait()
-                    job = self._next_job()
                 if self._stopping:
                     return
+                job = self._next_job()
+                if job is None:
+                    # While the server is offline, look again every 30 s.
+                    self._wake.wait(timeout=30 if self._storage else None)
+                    continue
                 job.status = JOB_RUNNING
             self.bus.emit('queue_changed')
             try:
@@ -304,6 +355,11 @@ class DownloadManager:
                 with self._lock:
                     job.current = None
                     job.status, job.error = JOB_FAILED, str(e)
+                    for ref in job.chapters:       # so they count as failed and can be retried
+                        if job.states.get(ref.key) in (QUEUED, DOWNLOADING):
+                            job.states[ref.key] = FAILED
+                            job.errors[ref.key] = str(e)
+                            self._emit_chapter(job, ref)
             self.bus.emit('queue_changed')
             self.bus.emit('job_progress', job.id)
             if job.finished:
@@ -311,7 +367,7 @@ class DownloadManager:
                 self._announce_finished(job)
 
     def _next_job(self) -> Optional[Job]:
-        if self._draining:
+        if self._draining or self._storage:
             return None
         return next((j for j in self._jobs if j.status == JOB_QUEUED and not j.paused and not j.cancelled), None)
 
@@ -320,7 +376,11 @@ class DownloadManager:
         if not site:
             raise RuntimeError("Unsupported or outdated link")
         root = self.library.download_root()
-        os.makedirs(root, exist_ok=True)
+        try:
+            os.makedirs(root, exist_ok=True)
+        except OSError as e:
+            self._block(job, storage_problem(root, str(e)) or (STORAGE_OFFLINE, str(e)))
+            return
         folder = self.library.manga_folder(job.title)
         job.folder_name = os.path.basename(folder)
 
@@ -329,7 +389,14 @@ class DownloadManager:
 
         manga = self.library.get_manga(job.manga_id) or {}
         manga['_total'] = self.library.chapter_total(job.manga_id)
-        write_folder_metadata(manga, folder, self.settings, manga['_total'])
+        try:
+            write_folder_metadata(manga, folder, self.settings, manga['_total'])
+        except OSError as e:
+            problem = storage_problem(root, str(e))
+            if problem:
+                self._block(job, problem)
+                return
+            logging.warning(f"Could not write the folder metadata of {job.title}: {e}")
 
         while True:
             with self._lock:
@@ -342,7 +409,14 @@ class DownloadManager:
                 ref = next((c for c in job.chapters if job.states.get(c.key) == QUEUED), None)
             if ref is None or job.cancelled or self._stopping:
                 break
-            self._download_one(job, key, site, ref, root, folder, manga)
+            problem = storage_problem(root)
+            if problem:
+                self._block(job, problem)
+                return
+            problem = self._download_one(job, key, site, ref, root, folder, manga)
+            if problem:
+                self._block(job, problem)
+                return
 
         with self._lock:
             job.current = None
@@ -354,7 +428,10 @@ class DownloadManager:
             else:
                 job.status = JOB_DONE
 
-    def _download_one(self, job: Job, site_key: str, site, ref: ChapterRef, root: str, folder: str, manga: dict) -> None:
+    def _download_one(self, job: Job, site_key: str, site, ref: ChapterRef, root: str, folder: str,
+                      manga: dict) -> Optional[Tuple[str, str]]:
+        """Download one chapter. Returns the storage problem if the drive went away / filled up
+        (the chapter is put back in the queue then), else None."""
         with self._lock:
             job.current = ref
             job.states[ref.key] = DOWNLOADING
@@ -362,7 +439,7 @@ class DownloadManager:
         self._emit_chapter(job, ref)
 
         attempts = max(1, self.settings.get_retry_attempts() + 1)
-        path, error = '', ''
+        path, error, problem = '', '', None
         for attempt in range(attempts):
             if job.cancelled or self._interrupted(job, site_key):
                 break
@@ -378,26 +455,28 @@ class DownloadManager:
                 error = str(e)
                 if not job.cancelled:
                     logging.warning(f"{job.title} ch.{ref.number} attempt {attempt + 1} failed: {e}")
-            if self._interrupted(job, site_key):
+            # Not the site's fault: retrying won't help until the drive is back / has space.
+            problem = storage_problem(root, error)
+            if problem or self._interrupted(job, site_key):
                 break
             if attempt + 1 < attempts and not job.cancelled:
                 time.sleep(2 * (attempt + 1))
 
-        if not path and not job.cancelled and self._interrupted(job, site_key):
-            # Paused mid-chapter: put it back so it starts over when the job is resumed.
+        if not path and not job.cancelled and (problem or self._interrupted(job, site_key)):
+            # Paused mid-chapter / storage gone: put it back so it starts over later.
             with self._lock:
                 job.states[ref.key] = QUEUED
                 job.progress[ref.key] = 0
                 job.current = None
             self._emit_chapter(job, ref)
             self.bus.emit('job_progress', job.id)
-            return
+            return problem
 
         if job.cancelled and not path:
             with self._lock:
                 job.states[ref.key] = CANCELLED
             self._emit_chapter(job, ref)
-            return
+            return None
 
         if path and site_key != 'mangadex':          # MangaDex files carry their own naming
             path = self.library.name_chapter_file(path, ref)
@@ -479,6 +558,23 @@ class DownloadManager:
         Other sites finish the chapter they are on. When closing the app (draining) the
         current chapter is always finished."""
         return site_key == 'mangadex' and job.paused and not job.cancelled and not self._draining
+
+    def _block(self, job: Job, problem: Tuple[str, str]) -> None:
+        """Stop the queue because of a storage problem. The job keeps its place and continues
+        with resume_storage() - or by itself once an offline server is reachable again."""
+        kind, message = problem
+        with self._lock:
+            first = self._storage is None
+            self._storage = problem
+            job.blocked = message
+            job.current = None
+            job.status = JOB_PAUSED
+        logging.warning(f"Downloads stopped: {message}")
+        if first and self.settings.notification_enabled('errors'):
+            hint = "They continue by themselves once it is back." if kind == STORAGE_OFFLINE \
+                else "Free up space, then press Continue."
+            title = "Download folder not reachable" if kind == STORAGE_OFFLINE else "Drive is full"
+            self.bus.emit('notify', 'errors', title, f"{message}\nDownloads are paused. {hint}", 'error')
 
     def _finish_cancelled(self, job: Job) -> None:
         job.status = JOB_CANCELLED
