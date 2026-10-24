@@ -2,18 +2,25 @@
 Webtoon downloader implementation - English only.
 """
 
+import io
+import os
+import re
+import time
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Tuple, Optional, Callable
+
 import requests
 from bs4 import BeautifulSoup
-from typing import List, Tuple, Optional, Callable
-import re
-import os
-import zipfile
+from requests.adapters import HTTPAdapter
 from urllib.parse import urljoin
 
 from .base import ComicSiteBase
 
 import logging
 logger = logging.getLogger(__name__)
+
+PARALLEL_IMAGES = 6      # image strips fetched at the same time per episode
 
 
 class WebtoonDownloader(ComicSiteBase):
@@ -22,6 +29,14 @@ class WebtoonDownloader(ComicSiteBase):
     def __init__(self):
         super().__init__("Webtoon", "https://www.webtoons.com")
         self._chapter_cache = {}
+        self._session = requests.Session()
+        self._session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.webtoons.com/',     # the image CDN refuses requests without it
+        })
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=PARALLEL_IMAGES * 2)
+        self._session.mount('https://', adapter)
     
     @classmethod
     def validate_url(cls, url: str) -> bool:
@@ -446,46 +461,58 @@ class WebtoonDownloader(ComicSiteBase):
                     logging.info(f"Found empty file for Chapter {chapter_num}, removing and redownloading")
                     os.remove(cbz_path)
 
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': 'https://www.webtoons.com/'
-            }
-
-            response = requests.get(chapter_url, headers=headers)
+            response = self._session.get(chapter_url, timeout=30)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
 
             image_container = soup.select_one('#_imageList')
             if not image_container:
-                raise Exception("Could not find image container")
+                raise RuntimeError("Could not find the images of this episode")
+            urls = [u for u in ((img.get('data-url') or img.get('src')) for img in image_container.find_all('img'))
+                    if isinstance(u, str) and u.startswith('http')]
+            if not urls:
+                raise RuntimeError("No images found in this episode")
 
-            images = image_container.find_all('img')
-            if not images:
-                raise Exception("No images found in chapter")
-
-            with zipfile.ZipFile(cbz_path, 'w') as cbz:
-                for idx, img in enumerate(images, 1):
-                    img_url = img.get('data-url') or img.get('src') if hasattr(img, 'get') else None
-                    if not img_url or not isinstance(img_url, str):
-                        continue
-
+            # An episode is split into many image strips. Fetch several at once over
+            # kept-alive connections - one new TLS connection per strip made this slow.
+            pages: List[Optional[bytes]] = [None] * len(urls)
+            done = 0
+            with ThreadPoolExecutor(max_workers=PARALLEL_IMAGES) as pool:
+                futures = {pool.submit(self._fetch_image, url): i for i, url in enumerate(urls)}
+                for future in as_completed(futures):
+                    pages[futures[future]] = future.result()     # raises -> whole chapter fails/retries
+                    done += 1
                     if progress_callback:
-                        progress_callback(idx, len(images))
-                    img_response = requests.get(img_url, headers=headers)
-                    img_response.raise_for_status()
-                    
-                    img_filename = f"{idx:03d}.jpg"
-                    cbz.writestr(img_filename, img_response.content)
+                        progress_callback(done, len(urls))
 
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_STORED) as cbz:    # images are already compressed
+                for idx, (url, data) in enumerate(zip(urls, pages), 1):
+                    ext = os.path.splitext(url.split('?')[0])[1].lower() or '.jpg'
+                    cbz.writestr(f"{idx:03d}{ext}", data)
+            part = cbz_path + '.part'
+            with open(part, 'wb') as f:
+                f.write(buffer.getvalue())
+            os.replace(part, cbz_path)
             return cbz_path
 
         except Exception as e:
             logging.error(f"Error downloading chapter {chapter_num}: {e}")
-            cbz_path = os.path.join(self.get_safe_manga_path(manga_name, base_path), f"Chapter {chapter_num}.cbz")
-            if os.path.exists(cbz_path):
-                os.remove(cbz_path)
-            return ""
+            raise
+
+    def _fetch_image(self, url: str) -> bytes:
+        last: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                response = self._session.get(url, timeout=30)
+                response.raise_for_status()
+                if not response.content:
+                    raise RuntimeError("empty image")
+                return response.content
+            except Exception as e:
+                last = e
+                time.sleep(1 + attempt)
+        raise RuntimeError(f"An image couldn't be downloaded ({last})")
 
 def get_manga_name(url: str) -> str:
     """Backward compatibility function."""
