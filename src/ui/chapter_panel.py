@@ -46,6 +46,7 @@ class ChapterModel(QAbstractListModel):
         self.filter_mode = 'all'
         self.search = ''
         self.newest_first = True
+        self.languages: List[str] = []      # shown languages, in picker order (rows get a tag when several)
 
     # --- data
     def set_chapters(self, chapters: List[ChapterRef]) -> None:
@@ -113,7 +114,8 @@ class ChapterModel(QAbstractListModel):
             if self.search and self.search not in ref.number.lower() and self.search not in (ref.name or '').lower():
                 continue
             rows.append(ref)
-        rows.sort(key=lambda r: chapter_sort_key(r.number), reverse=self.newest_first)
+        order = {lang: i for i, lang in enumerate(self.languages)}
+        rows.sort(key=lambda r: (chapter_sort_key(r.number), -order.get(r.language, 0)), reverse=self.newest_first)
         self._rows = rows
         self._row_of = {ref.key: i for i, ref in enumerate(rows)}
         self.endResetModel()
@@ -316,6 +318,8 @@ class ChapterDelegate(QStyledItemDelegate):
         title = f"Chapter {ref.number}"
         if ref.volume:
             title += f"  ·  Vol. {ref.volume}"
+        if len(self.model.languages) > 1:
+            title += f"  ·  {ref.language.upper()}"
         subtitle = ref.display_name
         if ref.group and len(ref.sources) < 2:      # several groups: shown in the chip
             subtitle = f"{subtitle}  ·  {ref.group}" if subtitle else ref.group
@@ -431,6 +435,72 @@ class ChapterList(QListView):
         menu.exec(self.viewport().mapToGlobal(pos))
 
 
+# ===================================================== language picker
+class _StayOpenMenu(QMenu):
+    """Menu whose checkable entries toggle without closing it (picking several languages)."""
+
+    def mouseReleaseEvent(self, event):   # noqa: N802
+        action = self.activeAction()
+        if action is not None and action.isCheckable() and action.isEnabled():
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class LanguagePicker(QComboBox):
+    """Looks like a combo box, but its popup lets several languages be ticked - e.g. to
+    download a series in English and Spanish. At least one stays ticked."""
+    changed = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._counts: Dict[str, int] = {}
+        self._order: List[str] = []
+        self._selected: List[str] = []
+        self.setToolTip('Languages to show. Tick several to download a series in more than one language.')
+
+    def set_languages(self, counts: Dict[str, int], selected: List[str]) -> None:
+        self._counts = counts
+        self._order = sorted(counts, key=lambda l: (l != 'en', language_name(l)))
+        self._selected = [l for l in self._order if l in selected]
+        self._render()
+
+    def selected(self) -> List[str]:
+        return list(self._selected)
+
+    def _render(self) -> None:
+        if len(self._selected) == 1:
+            lang = self._selected[0]
+            text = f"{language_name(lang)}  ({self._counts.get(lang, 0)})"
+        else:
+            text = ' + '.join(language_name(l) for l in self._selected)
+        self.blockSignals(True)
+        self.clear()
+        self.addItem(text)
+        self.setToolTip(text + '\n\nTick several languages to download the series in each of them.')
+        self.blockSignals(False)
+
+    def showPopup(self) -> None:   # noqa: N802
+        menu = _StayOpenMenu(self)
+        menu.setMinimumWidth(self.width())
+        for lang in self._order:
+            action = menu.addAction(f"{language_name(lang)}  ({self._counts[lang]})")
+            action.setCheckable(True)
+            action.setChecked(lang in self._selected)
+            action.toggled.connect(lambda on, l=lang, a=action: self._toggle(l, on, a))
+        menu.exec(self.mapToGlobal(QPoint(0, self.height() + 2)))
+        menu.deleteLater()
+
+    def _toggle(self, lang: str, on: bool, action) -> None:
+        if not on and self._selected == [lang]:
+            action.setChecked(True)         # the last language can't be unticked
+            return
+        chosen = set(self._selected) | {lang} if on else set(self._selected) - {lang}
+        self._selected = [l for l in self._order if l in chosen]
+        self._render()
+        self.changed.emit(self.selected())
+
+
 # =============================================================== panel
 class ChapterPanel(QFrame):
     closed = Signal()
@@ -444,7 +514,7 @@ class ChapterPanel(QFrame):
         self.manga_id: Optional[int] = None
         self.fetched: Optional[FetchedManga] = None
         self._by_language: Dict[str, List[ChapterRef]] = {}
-        self._language = 'en'
+        self._languages: List[str] = ['en']
         self._busy = False
         self._desc_expanded = False
 
@@ -551,9 +621,9 @@ class ChapterPanel(QFrame):
 
         row2 = QHBoxLayout()
         row2.setSpacing(6)
-        self.language = QComboBox(controls)
+        self.language = LanguagePicker(controls)
         self.language.setMinimumWidth(150)
-        self.language.currentIndexChanged.connect(self._language_changed)
+        self.language.changed.connect(self._languages_changed)
         row2.addWidget(self.language)
         self.group_filter = QComboBox(controls)
         self.group_filter.setMinimumWidth(150)
@@ -713,16 +783,10 @@ class ChapterPanel(QFrame):
             by_language.setdefault(ref.language, []).append(ref)
         self._by_language = by_language
 
-        if not keep_language or self._language not in by_language:
-            self._language = self._preferred_language(by_language)
-
-        self.language.blockSignals(True)
-        self.language.clear()
-        ordered = sorted(by_language, key=lambda l: (l != 'en', language_name(l)))
-        for lang in ordered:
-            self.language.addItem(f"{language_name(lang)}  ({len(by_language[lang])})", lang)
-        self.language.setCurrentIndex(max(0, ordered.index(self._language)) if self._language in ordered else 0)
-        self.language.blockSignals(False)
+        kept = [l for l in self._languages if l in by_language] if keep_language else []
+        self._languages = kept or self._preferred_languages(by_language)
+        self.language.set_languages({l: len(refs) for l, refs in by_language.items()}, self._languages)
+        self._languages = self.language.selected() or self._languages
         self.language.setVisible(len(by_language) > 1)
 
         self.model.live = {}
@@ -730,30 +794,31 @@ class ChapterPanel(QFrame):
             self.model.live = dict(self.core.downloads.chapter_states(self.manga_id))
             self.model.errors = {key: self.core.downloads.chapter_error(self.manga_id, key)
                                  for key, (state, _p) in self.model.live.items() if state == FAILED}
-        self.model.set_chapters(by_language.get(self._language, []))
-        self._fill_groups()
-        self._update_stats()
+        self._show_languages()
 
     @staticmethod
-    def _preferred_language(by_language: Dict[str, List[ChapterRef]]) -> str:
+    def _preferred_languages(by_language: Dict[str, List[ChapterRef]]) -> List[str]:
+        """Every language something was downloaded in (the ones being followed), else English,
+        else the language with the most chapters."""
         if not by_language:
-            return 'en'
-        downloaded = {l: sum(r.downloaded for r in refs) for l, refs in by_language.items()}
-        best = max(downloaded, key=downloaded.get)
-        if downloaded[best]:
-            return best
+            return ['en']
+        downloaded = [l for l, refs in by_language.items() if any(r.downloaded for r in refs)]
+        if downloaded:
+            return downloaded
         if 'en' in by_language:
-            return 'en'
-        return max(by_language, key=lambda l: len(by_language[l]))
+            return ['en']
+        return [max(by_language, key=lambda l: len(by_language[l]))]
 
-    def _language_changed(self, index: int) -> None:
-        lang = self.language.itemData(index)
-        if lang and lang != self._language:
-            self._language = lang
-            self.model.clear_selection()
-            self.model.set_chapters(self._by_language.get(lang, []))
-            self._fill_groups()
-            self._update_stats()
+    def _languages_changed(self, languages: List[str]) -> None:
+        if languages and languages != self._languages:
+            self._languages = languages
+            self._show_languages()
+
+    def _show_languages(self) -> None:
+        self.model.languages = list(self._languages)
+        self.model.set_chapters([r for lang in self._languages for r in self._by_language.get(lang, [])])
+        self._fill_groups()
+        self._update_stats()
 
     # ------------------------------------------------------ release groups
     def _preferred_group(self) -> str:
@@ -762,7 +827,7 @@ class ChapterPanel(QFrame):
         return (self.core.library.get_manga(self.manga_id) or {}).get('preferred_group', '') if self.manga_id else ''
 
     def _fill_groups(self) -> None:
-        """Groups of the shown language, the one with the most chapters first."""
+        """Groups of the shown languages, the one with the most chapters first."""
         counts: Dict[str, int] = {}
         for ref in self.model.chapters():
             for group in ([s.group for s in ref.sources] or ([ref.group] if ref.group else [])):

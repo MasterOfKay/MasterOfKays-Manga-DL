@@ -615,13 +615,22 @@ class DatabaseManager:
                 cursor.execute('''
                     SELECT m.id, m.title, m.url, m.site_type, m.description, m.author, m.genres,
                            m.status, m.cover_image_path, m.last_updated, m.first_download,
-                           COUNT(DISTINCT c.chapter_number) as total_chapters,
-                           COUNT(DISTINCT CASE WHEN c.is_downloaded = 1 THEN c.chapter_number END) as downloaded_chapters,
-                           COUNT(DISTINCT CASE WHEN c.is_new = 1 AND c.is_downloaded = 0 THEN c.chapter_number END) as new_chapters,
+                           -- per language: a series followed in two languages counts each one's chapters
+                           COUNT(DISTINCT COALESCE(c.language, 'en') || '|' || c.chapter_number) as total_chapters,
+                           COUNT(DISTINCT CASE WHEN c.is_downloaded = 1
+                                 THEN COALESCE(c.language, 'en') || '|' || c.chapter_number END) as downloaded_chapters,
+                           COUNT(DISTINCT CASE WHEN c.is_new = 1 AND c.is_downloaded = 0
+                                 THEN COALESCE(c.language, 'en') || '|' || c.chapter_number END) as new_chapters,
                            m.last_checked, m.language,
                            MAX(c.created_at) as latest_chapter_at
                     FROM manga m
                     LEFT JOIN chapters c ON m.id = c.manga_id
+                        -- Only the languages being followed (those with a downloaded chapter), so a
+                        -- MangaDex series isn't shown as incomplete because another language has
+                        -- more chapters. Nothing downloaded yet: every language counts.
+                        AND (NOT EXISTS (SELECT 1 FROM chapters d WHERE d.manga_id = m.id AND d.is_downloaded = 1)
+                             OR COALESCE(c.language, 'en') IN (SELECT COALESCE(d.language, 'en') FROM chapters d
+                                               WHERE d.manga_id = m.id AND d.is_downloaded = 1))
                     GROUP BY m.id, m.title
                     ORDER BY m.last_updated DESC
                 ''')

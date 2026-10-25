@@ -222,6 +222,13 @@ class DownloadManager:
         if not manga or not chapters:
             return None
         with self._lock:
+            # A finished job whose failed chapters are all queued again now is dropped (like
+            # retry_failed does) - otherwise it stays in the list next to the new attempt.
+            keys = {c.key for c in chapters}
+            self._jobs = [j for j in self._jobs if not (
+                j.manga_id == manga_id and j.finished
+                and any(j.states.get(c.key) in (FAILED, CANCELLED) for c in j.chapters)
+                and all(c.key in keys for c in j.chapters if j.states.get(c.key) in (FAILED, CANCELLED)))]
             job = next((j for j in self._jobs if j.manga_id == manga_id and not j.finished), None)
             if job is None:
                 job = Job(manga_id=manga_id, title=manga['title'], url=manga['url'],

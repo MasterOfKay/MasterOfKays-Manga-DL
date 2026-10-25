@@ -72,7 +72,8 @@ class JobRow(Card):
             self.bar.setProperty('thin', True)
         middle.addWidget(self.bar)
         if big:
-            self.chapter_line = label('', 'faint', self)
+            self.chapter_line = ElidedLabel('', self)
+            self.chapter_line.setProperty('role', 'faint')
             middle.addWidget(self.chapter_line)
         layout.addLayout(middle, 1)
 
@@ -211,7 +212,7 @@ class DownloadsPage(QWidget):
         col.setSpacing(12)
 
         col.addWidget(label('Downloads', 'h1', body))
-        col.addWidget(label('Paste a link, pick the chapters you want and follow the progress here.', 'muted', body))
+        col.addWidget(label('Paste a link, pick the chapters you want and follow the progress here.', 'muted', body, wrap=True))
         col.addSpacing(6)
 
         # ---- add link card
@@ -235,7 +236,9 @@ class DownloadsPage(QWidget):
         self.fetch_btn.clicked.connect(self._fetch)
         row.addWidget(self.fetch_btn)
         al.addLayout(row)
-        self.hint = label('', 'faint', add)
+        # Wraps: the list of supported sites is wider than the window and would otherwise widen the
+        # whole page (the page then scrolls sideways and can't make room for the chapter panel).
+        self.hint = label('', 'faint', add, wrap=True)
         al.addWidget(self.hint)
         self.fetch_bar = QProgressBar(add)
         self.fetch_bar.setProperty('thin', True)

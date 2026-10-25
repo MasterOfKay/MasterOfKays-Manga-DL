@@ -165,7 +165,22 @@ class CyrisiaDownloader(NovelSite):
                                               cover_path=cover_path, language=language)
 
     def _chapter_text(self, chapter_url: str):
-        soup = self._soup(chapter_url)
+        try:
+            soup = self._soup(chapter_url)
+        except requests.HTTPError as e:
+            if e.response is None or e.response.status_code != 404:
+                raise
+            name, file = _series_of(chapter_url), _file_of(chapter_url)
+            try:
+                listed = file in _file_names(self._series(name))
+            except (requests.RequestException, ValueError):
+                listed = False
+            if not listed:
+                raise
+            # Still in the catalog, yet the reader answers 'book not found' - the site can't open
+            # some file names (e.g. one ending in '..txt'). Nothing to fetch until Cyrisia fixes it.
+            raise ChapterUnavailable("Cyrisia lists this chapter but its own reader can't open it "
+                                     "(an error on the site). Try again once Cyrisia has fixed it.") from e
         title = soup.select_one('.ch-title, h1')
         return html_paragraphs(soup.select_one('article.ch-text')), title.get_text(' ', strip=True) if title else ''
 
