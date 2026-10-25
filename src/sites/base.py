@@ -29,6 +29,25 @@ def fix_text(text: str) -> str:
     return _C1.sub(repl, text)
 
 
+# Sites that only have novels (text chapters or whole volumes). Atsumaru has both and
+# keeps its novels under /novel/.
+NOVEL_HOSTS = ('freewebnovel.com', 'novelfire.net', 'wuxiabox.com', 'wuxia.click', 'novelbuddy.me', 'novelbuddy.com',
+               'novelarchive.cc', 'chikari.moe', 'cyrisia.com', 'lnori.com')
+
+# Cyrisia keeps web novels, light novels and comics all under /series/<name>, so its comic
+# series carry this marker in their link - that way the kind is known from the link alone.
+COMIC_MARKER = 'kind=comic'
+
+
+def is_novel_url(url: str) -> bool:
+    """Light/web novels (text chapters): a novel-only site, or e.g. https://atsu.moe/novel/<id>."""
+    if COMIC_MARKER in (url or ''):
+        return False
+    host = urlparse(url or '').netloc.lower()
+    host = host[4:] if host.startswith('www.') else host
+    return host in NOVEL_HOSTS or '/novel/' in (url or '')
+
+
 class ChapterUnavailable(Exception):
     """The chapter can't be downloaded right now (locked, premium, removed).
     Retrying immediately won't help, so the download queue gives up on it at once."""

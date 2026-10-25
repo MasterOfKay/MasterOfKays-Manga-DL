@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-from ..sites.base import fix_text  # noqa: F401  (re-exported for the core)
+from ..sites.base import fix_text, is_novel_url  # noqa: F401  (re-exported for the core)
 
 ChapterKey = Tuple[str, str]   # (language, chapter_number)
 
@@ -24,6 +24,15 @@ SITE_LABELS = {
     'atsumaru': 'Atsumaru',
     'mangaball': 'MangaBall',
     'weebcentral': 'Weeb Central',
+    'freewebnovel': 'FreeWebNovel',
+    'novelfire': 'Novel Fire',
+    'wuxiabox': 'Wuxia Box',
+    'wuxiaclick': 'wuxia.click',
+    'novelbuddy': 'NovelBuddy',
+    'novelarchive': 'Novel Archive',
+    'chikari': 'chikari.moe',
+    'cyrisia': 'Cyrisia',
+    'lnori': 'LNORI',
 }
 
 # Sites where one chapter can come from several release (scanlation) groups.
@@ -42,10 +51,6 @@ NOVEL_FORMATS = {
     'txt': ('Text', '.txt'),
 }
 
-
-def is_novel_url(url: str) -> bool:
-    """Light novels (text chapters) have their own address, e.g. https://atsu.moe/novel/<id>."""
-    return '/novel/' in (url or '')
 
 LANGUAGE_NAMES = {
     'en': 'English', 'ja': 'Japanese', 'ko': 'Korean', 'zh': 'Chinese', 'zh-hk': 'Chinese (HK)',

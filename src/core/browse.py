@@ -41,8 +41,13 @@ class BrowseService:
         self.thumbs_dir = os.path.join(data_dir(), 'thumbs')
         os.makedirs(self.thumbs_dir, exist_ok=True)
 
-    def sites(self) -> List[Tuple[str, str]]:
-        return [(b.key, b.label) for b in self.browsers.values()]
+    def sites(self, kind: str = '') -> List[Tuple[str, str]]:
+        """[(key, label)] of all sites, or of the sites that have 'manga' / 'novel'."""
+        return [(b.key, b.label) for b in self.browsers.values() if not kind or kind in b.kinds]
+
+    def kinds(self, site: str) -> Tuple[str, ...]:
+        browser = self.browsers.get(site)
+        return browser.kinds if browser else ()
 
 # Categories are merged by a normalized key, so picking "Isekai" uses each site's
 # own slug (MangaKatana "isekai", Asura "isekai", MangaDex tag id, ...). 
@@ -81,7 +86,9 @@ class BrowseService:
         category = self.category(category_key)
         return bool(category and site in category.slugs)
 
-    def browse(self, site: str, query: str = '', category_key: str = '', page: int = 1) -> Tuple[List[BrowseItem], bool]:
+    def browse(self, site: str, query: str = '', category_key: str = '', page: int = 1,
+               kind: str = '') -> Tuple[List[BrowseItem], bool]:
+        """kind: 'manga' / 'novel' limits a site that has both to one of them."""
         browser = self.browsers[site]
         slug = ''
         if category_key:
@@ -89,6 +96,8 @@ class BrowseService:
             slug = category.slugs.get(site, '') if category else ''
             if not slug:
                 return [], False
+        if kind and len(browser.kinds) > 1:
+            return browser.browse(query=query.strip(), genre_slug=slug, page=page, kind=kind)
         return browser.browse(query=query.strip(), genre_slug=slug, page=page)
 
 # Libary index for "In library" badges, so we can show which manga are already in the user's library.

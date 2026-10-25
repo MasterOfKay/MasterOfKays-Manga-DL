@@ -19,7 +19,9 @@ import requests
 
 from ..managers.database_manager import DatabaseManager, ChapterData, MangaMetadata as DBMetadata
 from ..sites import (AsuraComicsDownloader, AtsumaruDownloader, MangaBallDownloader, MangaDexDownloader, WeebCentralDownloader,
-                     MangaFreakDownloader, MangaKatanaDownloader, WebtoonDownloader)
+                     MangaFreakDownloader, MangaKatanaDownloader, WebtoonDownloader, ChikariDownloader, CyrisiaDownloader,
+                     LnoriDownloader, FreeWebNovelDownloader, NovelArchiveDownloader, NovelBuddyDownloader, NovelFireDownloader,
+                     WuxiaBoxDownloader, WuxiaClickDownloader)
 from ..sites.base import ChapterInfo, ComicSiteBase
 from .events import EventBus
 from .models import (MULTI_LANGUAGE_SITES, ChapterRef, ChapterSource, FetchedManga, chapter_file_name,
@@ -117,6 +119,16 @@ class Library:
             'atsumaru': AtsumaruDownloader(),
             'mangaball': MangaBallDownloader(),
             'weebcentral': WeebCentralDownloader(),
+            # novels only
+            'freewebnovel': FreeWebNovelDownloader(),
+            'novelfire': NovelFireDownloader(),
+            'wuxiabox': WuxiaBoxDownloader(),
+            'wuxiaclick': WuxiaClickDownloader(),
+            'novelbuddy': NovelBuddyDownloader(),
+            'novelarchive': NovelArchiveDownloader(),
+            'chikari': ChikariDownloader(),
+            'cyrisia': CyrisiaDownloader(),
+            'lnori': LnoriDownloader(),
         }
         self._folder_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
         self._folder_lock = threading.Lock()
@@ -211,7 +223,9 @@ class Library:
         return fixed
 
     def supported_sites(self) -> List[str]:
-        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak', 'Atsumaru', 'MangaBall', 'Weeb Central']
+        return ['Asura Comics', 'MangaKatana', 'Webtoon', 'MangaDex', 'MangaFreak', 'Atsumaru', 'MangaBall', 'Weeb Central',
+                'FreeWebNovel', 'Novel Fire', 'Wuxia Box', 'wuxia.click', 'NovelBuddy', 'Novel Archive', 'chikari.moe',
+                'Cyrisia', 'LNORI']
 
     # ---------------------------------------------------------------- folders
     def download_root(self, novel: bool = False) -> str:

@@ -99,7 +99,7 @@ class SettingsPage(QWidget):
 
         # --------------------------------------------------------- novels
         from ...core.models import NOVEL_FORMATS
-        card, box = self._section(body, col, 'Light novels')
+        card, box = self._section(body, col, 'Novels')
         novel_format = QComboBox(card)
         for key, (name, ext) in NOVEL_FORMATS.items():
             novel_format.addItem(f"{name}  ({ext})", key)
@@ -126,7 +126,7 @@ class SettingsPage(QWidget):
         self.novel_reset.clicked.connect(lambda: self._change_novel_folder(True))
         nl.addWidget(self.novel_reset)
         self._row(box, card, 'Novels folder',
-                  'Light novels can go to their own library folder (e.g. a Komga "Books" library). '
+                  'Novels can go to their own library folder (e.g. a Komga "Books" library). '
                   'Each novel still gets its own sub-folder.', novel_folder, last=True, wide=True)
         self._show_novel_folder()
 

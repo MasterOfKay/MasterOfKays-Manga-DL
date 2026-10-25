@@ -1,7 +1,7 @@
 """
-Manga Downloader - A desktop application for downloading manga from various sources.
+Manga and Novel Downloader - A desktop application for downloading manga and novels from various sources.
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0-beta"
 __author__ = "MasterOfKay"
-__description__ = "Modern manga downloader with support for multiple sources and a user-friendly interface."
+__description__ = "Modern manga and novel downloader with support for multiple sources and a user-friendly interface."

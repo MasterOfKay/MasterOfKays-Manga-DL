@@ -127,7 +127,7 @@ class JobRow(Card):
             text = job.error or 'Failed'
         if failed and job.status not in (JOB_FAILED,):
             text += f" · {failed} failed"
-        kind = '  ·  Light novel' if is_novel_url(job.url) else ''
+        kind = '  ·  Novel' if is_novel_url(job.url) else ''
         self.status.setText(f"{site_label(job.site_type)}{kind}  ·  {text}")
         role = 'error' if job.blocked else 'muted'
         if self.status.property('role') != role:

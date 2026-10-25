@@ -479,7 +479,7 @@ class ChapterPanel(QFrame):
         badges.setSpacing(6)
         self.site_pill = Pill('', 'neutral', header)
         self.status_pill = Pill('', 'neutral', header)
-        self.novel_pill = Pill('Light novel', 'info', header)
+        self.novel_pill = Pill('Novel', 'info', header)
         self.novel_pill.setToolTip('Text chapters - saved in the novel format chosen in Settings (EPUB by default)')
         badges.addWidget(self.site_pill)
         badges.addWidget(self.novel_pill)

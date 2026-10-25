@@ -1,6 +1,6 @@
 """
-Library page: every manga in the database with download progress, new-chapter
-badges and update checks.
+Library page: every manga and novel in the database with download progress,
+new-chapter badges and update checks, filtered by All / Manga / Novels.
 """
 
 import os
@@ -112,7 +112,7 @@ class MangaCard(Card):
         self.cover.set_cover(data.get('cover_image_path') or '', title)
         parts = [site_label(data.get('site_type', ''))]
         if is_novel_url(data.get('url', '')):
-            parts.append('Light novel')
+            parts.append('Novel')
         author = (data.get('author') or '').strip()
         if any(ch.isalnum() for ch in author):
             parts.append(author)
@@ -258,6 +258,11 @@ class LibraryPage(QWidget):
                                                   QLineEdit.LeadingPosition)
         self.search.textChanged.connect(self._apply)
         tools.addWidget(self.search, 1)
+        self.kind = Segmented([('all', 'All'), ('manga', 'Manga'), ('novel', 'Novels')],
+                              core.settings.get('library.kind', 'all') or 'all', body)
+        self.kind.setToolTip('Show manga, novels or both')
+        self.kind.changed.connect(self._kind_changed)
+        tools.addWidget(self.kind)
         self.filter = Segmented([('all', 'All'), ('new', 'New chapters'), ('missing', 'Incomplete')], 'all', body)
         self.filter.changed.connect(lambda _k: self._apply())
         tools.addWidget(self.filter)
@@ -318,12 +323,19 @@ class LibraryPage(QWidget):
         self._apply()
         total_downloaded = sum(m.get('downloaded_chapters', 0) for m in self._data)
         n = len(self._data)
-        self.summary.setText(f"{n} series  ·  {total_downloaded} chapters downloaded")
+        novels = sum(1 for m in self._data if is_novel_url(m.get('url', '')))
+        kinds = f"{n - novels} manga, {novels} novel{'s' if novels != 1 else ''}" if novels else f"{n} series"
+        self.summary.setText(f"{kinds}  ·  {total_downloaded} chapters downloaded")
         self.new_count_changed.emit(sum(1 for m in self._data if m.get('new_chapters')))
+
+    def _kind_changed(self, kind: str) -> None:
+        self.core.settings.set('library.kind', kind)
+        self._apply()
 
     def _apply(self) -> None:
         query = self.search.text().strip().lower()
         mode = self.filter.current()
+        kind = self.kind.current()
         sort = self.sort.currentData()
         items = list(self._data)
         if sort == 'title':
@@ -344,6 +356,8 @@ class LibraryPage(QWidget):
             visible = True
             if query and query not in data.get('title', '').lower() and query not in (data.get('author') or '').lower():
                 visible = False
+            if kind != 'all' and is_novel_url(data.get('url', '')) != (kind == 'novel'):
+                visible = False
             if mode == 'new' and not data.get('new_chapters'):
                 visible = False
             if mode == 'missing' and data.get('downloaded_chapters', 0) >= data.get('total_chapters', 0):
@@ -354,7 +368,8 @@ class LibraryPage(QWidget):
 
         if not self._data:
             self.empty.set_text('Your library is empty',
-                                'Manga you download show up here, and new chapters get checked automatically.')
+                                'Manga and novels you download show up here, and new chapters get checked '
+                                'automatically.')
         else:
             self.empty.set_text('Nothing matches', 'Try a different search or filter.')
         self.empty.setVisible(self._loaded and shown == 0)

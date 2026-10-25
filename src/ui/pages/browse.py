@@ -1,9 +1,10 @@
 """
-Browse page: newest manga per site, search and category filter across sites.
-Clicking a manga opens the chapter panel (like pasting its link).
+Browse page: newest manga and novels per site, search and category filter across
+sites, and a Manga / Novels switch. Clicking a title opens the chapter panel (like
+pasting its link).
 """
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLineEdit, QProgressBar, QPushButton, QScrollArea,
@@ -14,7 +15,7 @@ from ...sites.browsing import BrowseItem
 from .. import icons, theme
 from ..bridge import Bridge
 from ..tasks import run_async
-from ..widgets import Button, Card, Cover, ElidedLabel, IconButton, Pill, label
+from ..widgets import Button, Card, Cover, ElidedLabel, IconButton, Pill, Segmented, label
 
 CARD_WIDTH = 148
 COVER_HEIGHT = 208
@@ -90,7 +91,7 @@ class BrowseCard(QFrame):
             pills = QHBoxLayout()
             pills.setSpacing(4)
             if item.is_novel:
-                pills.addWidget(Pill('Light novel', 'info', self))
+                pills.addWidget(Pill('Novel', 'info', self))
             if in_library:
                 pills.addWidget(Pill('In library', 'success', self))
             pills.addStretch(1)
@@ -284,7 +285,8 @@ class SiteSection(QWidget):
             if not self._cards:
                 self.row.hide()
 
-        run_async(lambda: browse.browse(self.site, query, category, page_no), done, failed)
+        kind = self.page.kind()
+        run_async(lambda: browse.browse(self.site, query, category, page_no, kind), done, failed)
 
     def _add(self, items: List[BrowseItem]) -> None:
         index = self.page.library_index
@@ -338,8 +340,8 @@ class BrowsePage(QWidget):
         self.col.setSpacing(12)
 
         self.col.addWidget(label('Browse', 'h1', body))
-        self.col.addWidget(label('The newest manga from every site. Search, filter by category, '
-                                 'and click a manga to pick chapters.', 'muted', body))
+        self.col.addWidget(label('The newest manga and novels from every site. Search, filter by category, '
+                                 'and click a title to pick chapters.', 'muted', body))
         self.col.addSpacing(4)
 
         bar = Card(body)
@@ -370,11 +372,38 @@ class BrowsePage(QWidget):
         top.addWidget(go)
         bl.addLayout(top)
 
-        chips = QHBoxLayout()
-        chips.setSpacing(6)
-        chips.addWidget(label('Sites', 'faint', bar))
+        kinds = QHBoxLayout()
+        kinds.setSpacing(8)
+        self.kind_switch = Segmented([('all', 'All'), ('manga', 'Manga'), ('novel', 'Novels')],
+                                     core.settings.get('browse.kind', 'all') or 'all', bar)
+        self.kind_switch.setToolTip('Show manga, novels or both')
+        self.kind_switch.changed.connect(self._kind_changed)
+        kinds.addWidget(self.kind_switch)
+        kinds.addStretch(1)
+        refresh = IconButton('refresh', 'Reload everything', bar)
+        refresh.clicked.connect(self._apply)
+        kinds.addWidget(refresh)
+        bl.addLayout(kinds)
+
+        # One row of site chips per kind - all of them don't fit on one line.
+        self._chip_rows: Dict[str, Tuple[QWidget, QHBoxLayout]] = {}
+        for kind, title in (('manga', 'Manga sites'), ('novel', 'Novel sites')):
+            row = QWidget(bar)
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(6)
+            caption = label(title, 'faint', row)
+            caption.setMinimumWidth(78)
+            rl.addWidget(caption)
+            rl.addStretch(1)
+            bl.addWidget(row)
+            self._chip_rows[kind] = (row, rl)
         self._chips: Dict[str, QPushButton] = {}
-        enabled = core.settings.get('browse.sites') or [k for k, _ in core.browse.sites()]
+        every = [k for k, _ in core.browse.sites()]
+        saved = core.settings.get('browse.sites') or []
+        known = core.settings.get('browse.known_sites') or saved
+        enabled = saved + [k for k in every if k not in known] if saved else every   # sites added since: on
+        core.settings.set('browse.known_sites', every)
         for key, name in core.browse.sites():
             chip = QPushButton(name, bar)
             chip.setProperty('chip', True)
@@ -382,13 +411,8 @@ class BrowsePage(QWidget):
             chip.setChecked(key in enabled)
             chip.setCursor(Qt.PointingHandCursor)
             chip.toggled.connect(lambda checked, k=key: self._site_toggled(k, checked))
-            chips.addWidget(chip)
             self._chips[key] = chip
-        chips.addStretch(1)
-        refresh = IconButton('refresh', 'Reload everything', bar)
-        refresh.clicked.connect(self._apply)
-        chips.addWidget(refresh)
-        bl.addLayout(chips)
+        self._show_kind_chips()
         self.col.addWidget(bar)
         self.col.addSpacing(8)
 
@@ -420,6 +444,11 @@ class BrowsePage(QWidget):
     def category(self) -> str:
         return self.category_box.currentData() or ''
 
+    def kind(self) -> str:
+        """'manga', 'novel', or '' for both."""
+        kind = self.kind_switch.current()
+        return '' if kind == 'all' else kind
+
     def category_name(self) -> str:
         category = self.core.browse.category(self.category())
         return category.name if category else ''
@@ -436,8 +465,37 @@ class BrowsePage(QWidget):
         run_async(self.core.browse.categories, done,
                   lambda m: self.toast.emit("Couldn't load categories", m, 'warning'))
 
+    def _kind_sites(self) -> List[str]:
+        return [k for k, _ in self.core.browse.sites(self.kind())]
+
+    def _show_kind_chips(self) -> None:
+        """Manga sites in the first row, novel sites in the second; a site with both (Atsumaru)
+        sits with the manga sites unless only novels are shown."""
+        kind = self.kind()
+        rows = {'manga': [], 'novel': []}
+        for key, chip in self._chips.items():
+            kinds = self.core.browse.kinds(key)
+            row = 'novel' if kind == 'novel' and 'novel' in kinds or 'manga' not in kinds else 'manga'
+            rows[row].append(chip)
+        for _row, layout in self._chip_rows.values():
+            for chip in self._chips.values():
+                layout.removeWidget(chip)
+        for row_kind, chips in rows.items():
+            row, layout = self._chip_rows[row_kind]
+            for chip in chips:
+                layout.insertWidget(layout.count() - 1, chip)      # before the stretch
+            row.setVisible(bool(chips) and kind in ('', row_kind))
+
+    def _kind_changed(self, kind: str) -> None:
+        self.core.settings.set('browse.kind', kind)
+        self._show_kind_chips()
+        if self._started:
+            self._build_sections()
+            for section in self._sections.values():
+                section.reload()        # a site with both (Atsumaru) shows other titles now
+
     def _site_toggled(self, key: str, checked: bool) -> None:
-        if not checked and not any(c.isChecked() for c in self._chips.values()):
+        if not checked and not any(self._chips[k].isChecked() for k in self._kind_sites()):
             self._chips[key].setChecked(True)          # keep at least one site
             return
         self.core.settings.set('browse.sites', [k for k, c in self._chips.items() if c.isChecked()])
@@ -449,7 +507,9 @@ class BrowsePage(QWidget):
             section.reload()
 
     def _build_sections(self) -> None:
-        wanted = [k for k, c in self._chips.items() if c.isChecked()]
+        sites = self._kind_sites()
+        # All sites of this kind turned off earlier (e.g. under "Manga"): show them all instead of nothing.
+        wanted = [k for k in sites if self._chips[k].isChecked()] or sites
         for key in [k for k in self._sections if k not in wanted]:
             section = self._sections.pop(key)
             section.hide()
