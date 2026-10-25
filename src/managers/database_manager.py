@@ -613,6 +613,13 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 
                 cursor.execute('''
+                    -- The languages being followed per manga (those with a downloaded chapter), so a
+                    -- MangaDex series isn't shown as incomplete because another language has more
+                    -- chapters. Nothing downloaded yet: every language counts.
+                    WITH followed AS (
+                        SELECT DISTINCT manga_id, COALESCE(language, 'en') AS language
+                        FROM chapters WHERE is_downloaded = 1
+                    )
                     SELECT m.id, m.title, m.url, m.site_type, m.description, m.author, m.genres,
                            m.status, m.cover_image_path, m.last_updated, m.first_download,
                            -- per language: a series followed in two languages counts each one's chapters
@@ -625,12 +632,8 @@ class DatabaseManager:
                            MAX(c.created_at) as latest_chapter_at
                     FROM manga m
                     LEFT JOIN chapters c ON m.id = c.manga_id
-                        -- Only the languages being followed (those with a downloaded chapter), so a
-                        -- MangaDex series isn't shown as incomplete because another language has
-                        -- more chapters. Nothing downloaded yet: every language counts.
-                        AND (NOT EXISTS (SELECT 1 FROM chapters d WHERE d.manga_id = m.id AND d.is_downloaded = 1)
-                             OR COALESCE(c.language, 'en') IN (SELECT COALESCE(d.language, 'en') FROM chapters d
-                                               WHERE d.manga_id = m.id AND d.is_downloaded = 1))
+                        AND (m.id NOT IN (SELECT manga_id FROM followed)
+                             OR (c.manga_id, COALESCE(c.language, 'en')) IN (SELECT manga_id, language FROM followed))
                     GROUP BY m.id, m.title
                     ORDER BY m.last_updated DESC
                 ''')

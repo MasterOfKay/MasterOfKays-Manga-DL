@@ -54,6 +54,7 @@ env/
 !.github/**/
 !tests/
 !docs/
+!docs/**/
 !examples/
 !*/.*
 !*/__pycache__

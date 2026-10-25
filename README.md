@@ -1,226 +1,131 @@
-# MasterOfKay's Manga Downloader
+<div align="center">
 
-A Python-based manga downloader that supports downloading from multiple manga sites for offline reading.
+<img src="Logo.png" width="96" alt="Manga DL logo">
 
+# Manga DL
 
-## Warning! Yes i use AI for the UI. SO the code for downlading is 99% myself while the UI code is 85% Ai generetaded. Also Readme and some Englisch translation where made by AI or Google Translate, as ENglisch is not my native language. Have a good one
+Download manga, manhwa and web novels from a bunch of sites and keep them in one library.
+Works great next to Komga, Kavita or Jellyfin.
 
-## Currently Supported Sites
+[Download](https://github.com/MasterOfKay/MasterOfKays-Manga-DL/releases/latest) ·
+[Report a bug](https://github.com/MasterOfKay/MasterOfKays-Manga-DL/issues) ·
+[MIT License](LICENSE.md)
 
-- [AsuraScans](https://asurascans.com/comics)
-- [MangaKatana](https://mangakatana.com)
-- [Webtoon](https://www.webtoons.com)
-- MangaDex
+</div>
 
-## Features
+![Library with the chapter panel open](docs/screenshots/chapters.png)
 
-- ✔ Download manga chapters from supported sites
-- ✔ Save chapters as CBZ files for offline reading
-- ✔ Selective chapter downloading (single, range, or all)
-- ✔ Skip already downloaded chapters
-- ✔ Multiple user interfaces (GUI and CLI)
-- ✔ Download queue management
-- ✔ Pause and resume downloads
-- ✔ Custom download path selection
-- ✔ Multi-language support for Webtoon
-- ✔ Download history tracking
-- ✔ Easy new chapter detection and download
-- ✔ Modern, redesigned user interface
+## What it does
 
-## Installation
+You paste a link (or find something on the Browse page), tick the chapters you want and hit download.
+Manga ends up as CBZ files, novels as EPUB, one folder per series. After that the app keeps an eye
+on your library and tells you when new chapters are out. If you want, it downloads them on its own.
 
-### Option 1: Download the Executable (Windows)
+Things I use it for every day:
 
-For Windows users, a standalone executable version of the GUI is included in the GitHub repository ZIP download. No Python installation required!
+- **Queue that you can walk away from.** Pause, resume, retry the failed ones.
+- **Library with update checks.** It checks every hour by default (you can change that) and shows a badge
+  when something new came out. The Incomplete filter shows what you still haven't grabbed.
+- **Browse.** The latest updates from every site on one page, with search and categories.
+- **Novels too.** Text chapters get saved as EPUB by default. PDF, Word, HTML, Markdown and plain
+  text work as well. Novels can go into their own folder, e.g. a separate Komga "Books" library.
+- **Media server metadata.** ComicInfo.xml inside each chapter, Mylar `series.json` and a cover
+  image, so Komga, Kavita and Jellyfin show proper titles, descriptions and posters. There's a
+  one-click setup for each of them in the settings.
+- **MangaDex languages and groups.** Pick one language or several, and choose which scanlation
+  group you want a chapter from if more than one uploaded it.
+- **Updates itself** from the GitHub releases (betas are opt-in).
 
-1. Download the ZIP from GitHub
-2. Extract the files
-3. Run `MangaDownloader.exe` to start the application
+## Supported sites
 
-The executable version includes all required dependencies and works without any additional installation.
+| Manga / Manhwa | Web novels |
+| --- | --- |
+| [Asura Comics](https://asurascans.com) | [FreeWebNovel](https://freewebnovel.com) |
+| [MangaKatana](https://mangakatana.com) | [Novel Fire](https://novelfire.net) |
+| [Webtoon](https://www.webtoons.com) | Wuxia Box |
+| [MangaDex](https://mangadex.org) | wuxia.click |
+| MangaFreak | NovelBuddy |
+| Atsumaru | Novel Archive |
+| MangaBall | chikari.moe |
+| Weeb Central | [Cyrisia](https://cyrisia.com) (novels, light novels and comics) |
+| | LNORI |
 
-> **Note**: A standalone executable will also be available in GitHub Releases for easier access.
+Sites change their layout from time to time and that breaks things. If one stops working, please
+open an issue with the link you tried.
 
-### Option 2: Install from Source
+## Screenshots
 
-1. Clone this repository or download the ZIP file
-2. Install dependencies:
+<table>
+  <tr>
+    <td><img src="docs/screenshots/library.png" alt="Library"></td>
+    <td><img src="docs/screenshots/browse.png" alt="Browse"></td>
+  </tr>
+  <tr>
+    <td align="center">Library</td>
+    <td align="center">Browse</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/settings.png" alt="Settings"></td>
+    <td><img src="docs/screenshots/chapters.png" alt="Chapter panel"></td>
+  </tr>
+  <tr>
+    <td align="center">Settings</td>
+    <td align="center">Picking chapters</td>
+  </tr>
+</table>
+
+## Getting it
+
+### Ready-made build
+
+Grab `MangaDL-windows.exe` or `MangaDL-linux` from the
+[latest release](https://github.com/MasterOfKay/MasterOfKays-Manga-DL/releases/latest) and run it.
+No Python needed.
+
+### From source
+
+You need Python 3.10 or newer.
 
 ```bash
+git clone https://github.com/MasterOfKay/MasterOfKays-Manga-DL.git
+cd MasterOfKays-Manga-DL
 pip install -r requirements.txt
+python main.py
 ```
 
-## Usage
+## Where your stuff goes
 
-### Quick Start
-
-#### Using the Executable (Windows)
-
-Simply double-click `MangaDownloader.exe` to launch the GUI version.
-
-#### Using Python
-
-Run the launcher script to automatically select the best available interface:
-
-```bash
-python run.py
-```
-
-### Available Interfaces
-
-#### GUI Interface (gui.py)
-
-The GUI interface provides:
-
-- Easy-to-use form for entering manga URLs
-- Chapter selection dialog
-- Download queue management
-- Pause/resume functionality
-- Chapter download progress tracking
-- Chapter list viewer
-- **Custom download location** - Choose where your manga chapters are saved
-
-```bash
-python gui.py
-```
-
-##### Setting Custom Download Path
-
-You can now specify where you want your manga downloads to be saved:
-
-1. Use the "Save Path" field to view or edit the current download path
-2. Click "Browse..." to select a folder using the file explorer
-3. Your chosen path will be remembered between application restarts
-
-> **Technical Note**: The download path configuration is stored in `~/.mangadownloader/config.txt` on Linux/Mac and `C:\Users\<username>\.mangadownloader\config.txt` on Windows.
-
-#### Enhanced CLI (enhanced_dl.py)
-
-A menu-based CLI interface with:
-
-- Interactive menu
-- Chapter browser
-- Download status display
-- Range selection
-
-```bash
-python enhanced_dl.py
-```
-
-#### Basic CLI (dl.py)
-
-Simple command-line interface for:
-
-- Quick chapter downloads
-- Batch processing
-
-```bash
-python dl.py
-```
-
-### Download Examples
-
-#### GUI Mode
-
-1. Enter the manga URL in the input field
-2. Click "Download" button
-3. Select chapters you want to download
-4. Manage downloads from the queue
-
-#### CLI Mode
-
-Enter a manga URL and optionally a chapter range:
-
-1. **Download all chapters:**
+Downloads land in the folder you set in Settings (you can change it any time):
 
 ```
-https://asuracomic.net/series/i-obtained-a-mythic-item
+Manga/
+├── Solo Leveling/
+│   ├── cover.png
+│   ├── series.json
+│   ├── Chapter 1 - The Weakest Hunter.cbz
+│   └── Chapter 2.cbz
+└── Shadow Slave (Novel)/
+    ├── Chapter 1.epub
+    └── Chapter 2.epub
 ```
 
-2. **Download a single chapter:**
+The app's own data (library database, settings, covers, logs) lives in `~/.mangadownloader`,
+which is `C:\Users\<you>\.mangadownloader` on Windows.
 
-```
-https://asuracomic.net/series/i-obtained-a-mythic-item 34
-```
+## A note from me
 
-3. **Download a range of chapters:**
+The download code is pretty much all mine. For the UI I had a lot of help from AI, and some of the
+English text too, because English isn't my first language. So if something reads weird, that's why.
 
-```
-https://www.webtoons.com/de/romance/hot-guy-and-a-beast/list?title_no=4374 5-10
-```
+## Please support the creators
 
-### Output Structure
-
-By default, downloads will be organized as follows:
-
-```
-Current Directory/
-└── Manga Name/
-    ├── Chapter 1.cbz
-    ├── Chapter 2.cbz
-    └── Chapter 3.cbz
-```
-
-When using a custom path, the structure will be:
-
-```
-Your Selected Path/
-└── Manga Name/
-    ├── Chapter 1.cbz
-    ├── Chapter 2.cbz
-    └── Chapter 3.cbz
-```
-
-## Requirements
-
-### For Executable Version
-
-- Windows operating system
-- No additional requirements
-
-### For Source Code Version
-
-- Python 3.6+
-- Required packages (installed via requirements.txt):
-  - requests
-  - beautifulsoup4
-  - PySide6 (Qt 6, for the GUI)
-  - selenium (for certain sites)
-
-## Building the Executable
-
-You can build your own executable using PyInstaller:
-
-```bash
-python build_exe.py
-```
-
-Or using Auto-PY-to-EXE:
-
-```bash
-pip install auto-py-to-exe
-auto-py-to-exe
-```
-
-## Disclaimer
-
-This tool is for personal use only. Please support the content creators by purchasing official releases when available.
+This is meant for keeping your own offline copies. If a series has an official release, buy it or
+read it on the official app. The people making these stories deserve it.
 
 ## Contributing
 
-Feel free to:
+Bug reports, site requests and pull requests are all welcome. For a broken site, the link you used
+and the error from the app help a lot. Turning on *Debug log* under Settings › Advanced writes
+`manga_downloader.log` into the data folder, and attaching that is even better.
 
-- Report bugs via issues
-- Suggest new features
-- Submit pull requests
-
-## License
-
-This project is for educational purposes only. Use responsibly and respect copyright laws.
-
-## Upcoming Features
-
-The following features are planned for future updates:
-- 📊 **Enhanced Download Statistics** - Track your manga collection growth
-
-Have a feature suggestion? Feel free to open an issue or contribute to the project!
+Licensed under [MIT](LICENSE.md).
