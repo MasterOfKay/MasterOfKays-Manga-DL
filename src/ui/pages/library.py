@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLineEdit, QMenu, QMessag
                                QScrollArea, QVBoxLayout, QWidget)
 
 from ...core import AppCore
-from ...core.downloads import JOB_PAUSED, JOB_QUEUED, JOB_RUNNING
+from ...core.downloads import DOWNLOADING, JOB_PAUSED, JOB_QUEUED, JOB_RUNNING, QUEUED
 from ...core.models import is_novel_url, site_label
 from .. import icons, theme
 from ..bridge import Bridge
@@ -230,6 +230,11 @@ class LibraryPage(QWidget):
         self.summary = label('', 'muted', body)
         titles.addWidget(self.summary)
         head.addLayout(titles, 1)
+        self.download_new_btn = Button('Download all new', 'download', None, body)
+        self.download_new_btn.setToolTip('Queue every new chapter of every manga and novel in the library')
+        self.download_new_btn.clicked.connect(self._download_all_new)
+        self.download_new_btn.setVisible(False)
+        head.addWidget(self.download_new_btn, 0, Qt.AlignTop)
         self.check_btn = Button('Check for updates', 'refresh', 'primary', body)
         self.check_btn.clicked.connect(self._check_all)
         head.addWidget(self.check_btn, 0, Qt.AlignTop)
@@ -327,6 +332,9 @@ class LibraryPage(QWidget):
         kinds = f"{n - novels} manga, {novels} novel{'s' if novels != 1 else ''}" if novels else f"{n} series"
         self.summary.setText(f"{kinds}  ·  {total_downloaded} chapters downloaded")
         self.new_count_changed.emit(sum(1 for m in self._data if m.get('new_chapters')))
+        new_total = sum(m.get('new_chapters') or 0 for m in self._data)
+        self.download_new_btn.setText(f"Download {new_total} new")
+        self.download_new_btn.setVisible(new_total > 0)
 
     def _kind_changed(self, kind: str) -> None:
         self.core.settings.set('library.kind', kind)
@@ -381,6 +389,26 @@ class LibraryPage(QWidget):
             return
         if self.core.updates.check_all(manual=True):
             self._set_bulk(True)
+
+    def _download_all_new(self) -> None:
+        chapters = series = 0
+        for data in self._data:
+            if not data.get('new_chapters'):
+                continue
+            busy = {key for key, (state, _p) in self.core.downloads.chapter_states(data['id']).items()
+                    if state in (QUEUED, DOWNLOADING)}
+            refs = [r for r in self.core.library.chapters(data['id'])
+                    if r.is_new and not r.downloaded and not r.early_access and r.key not in busy]
+            if refs:
+                self.core.downloads.add(data['id'], refs)
+                chapters += len(refs)
+                series += 1
+        if chapters:
+            noun = 'chapter' if chapters == 1 else 'chapters'
+            where = f"from {series} series" if series > 1 else ''
+            self.toast.emit('Added to queue', f"{chapters} new {noun} {where}".strip(), 'success')
+        else:
+            self.toast.emit('Nothing to add', 'All new chapters are already in the queue.', 'info')
 
     def _set_bulk(self, running: bool) -> None:
         self.check_btn.setEnabled(not running)

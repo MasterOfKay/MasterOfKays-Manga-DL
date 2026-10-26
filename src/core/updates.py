@@ -14,13 +14,15 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Optional, Set
+from itertools import zip_longest
+from typing import Dict, List, Optional, Set
 
 from .downloads import DownloadManager
 from .events import EventBus
 from .library import Library
 
-MAX_PARALLEL_CHECKS = 3
+MAX_PARALLEL_CHECKS = 8
+PER_SITE_CHECKS = 2          # at once on the same site - stay polite
 
 
 class UpdateChecker:
@@ -34,6 +36,7 @@ class UpdateChecker:
         self._bulk_running = False
         self._stop = threading.Event()
         self._timer = threading.Thread(target=self._timer_loop, name="update-timer", daemon=True)
+        self._site_slots: Dict[str, threading.Semaphore] = {}
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -103,10 +106,10 @@ class UpdateChecker:
     def _check_all(self, manual: bool) -> None:
         new_total = manga_with_new = errors = 0
         try:
-            mangas = [m for m in self.library.list_manga() if m.get('url')]
+            mangas = _interleave_sites([m for m in self.library.list_manga() if m.get('url')])
             self.bus.emit('check_progress', 0, len(mangas))
             with ThreadPoolExecutor(max_workers=MAX_PARALLEL_CHECKS, thread_name_prefix="check") as pool:
-                futures = {pool.submit(self._run_check, m['id']): m for m in mangas}
+                futures = {pool.submit(self._run_check, m['id'], site=m.get('site_type', '')): m for m in mangas}
                 for done, future in enumerate(as_completed(futures), start=1):
                     try:
                         count = future.result()
@@ -126,12 +129,15 @@ class UpdateChecker:
                 detail = "Everything is up to date" + (f" ({errors} couldn't be checked)" if errors else "")
                 self.bus.emit('notify', 'manual', 'Update check finished', detail, 'warning' if errors else 'info')
 
-    def _run_check(self, manga_id: int, already_marked: bool = False) -> int:
+    def _run_check(self, manga_id: int, already_marked: bool = False, site: str = '') -> int:
         if not already_marked:
             with self._lock:
                 if manga_id in self._checking:
                     return 0
                 self._checking.add(manga_id)
+        with self._lock:
+            slot = self._site_slots.setdefault(site, threading.Semaphore(PER_SITE_CHECKS))
+        slot.acquire()
         self.bus.emit('check_state', manga_id, True)
         try:
             new_refs = self.library.refresh(manga_id)
@@ -152,7 +158,17 @@ class UpdateChecker:
                     self.downloads.add(manga_id, list(wanted.values()))
             return len(new_refs)
         finally:
+            time.sleep(0.2)   # be gentle with the sites
+            slot.release()
             with self._lock:
                 self._checking.discard(manga_id)
             self.bus.emit('check_state', manga_id, False)
-            time.sleep(0.2)   # be gentle with the sites
+
+
+def _interleave_sites(mangas: List[dict]) -> List[dict]:
+    """Round-robin over the sites, so the parallel checks spread over all of them instead of
+    queueing up behind one site's PER_SITE_CHECKS limit."""
+    by_site: Dict[str, List[dict]] = {}
+    for manga in mangas:
+        by_site.setdefault(manga.get('site_type', ''), []).append(manga)
+    return [m for group in zip_longest(*by_site.values()) for m in group if m is not None]

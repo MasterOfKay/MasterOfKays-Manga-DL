@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -95,6 +96,7 @@ def parse_chapter_file(filename: str, folder_title: str = '') -> Optional[Tuple[
     return None
 
 
+SYNC_WORKERS = 8                 # folders listed at once by sync_all()
 _UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 
 
@@ -468,6 +470,14 @@ class Library:
             language, number = parsed
             language = (language or 'en') if is_mangadex else None
             on_disk.setdefault((language, self._norm(number)), os.path.join(folder, name))
+        # One listing instead of a stat per chapter - on a network share that is minutes vs. seconds.
+        listed = {os.path.normcase(name) for name in names}
+        folder_key = os.path.normcase(os.path.normpath(os.path.abspath(folder)))
+
+        def exists(path: str) -> bool:
+            if os.path.normcase(os.path.dirname(os.path.abspath(path))) == folder_key:
+                return os.path.normcase(os.path.basename(path)) in listed
+            return os.path.exists(path)         # in a sub-folder
 
         changed = 0
         for ch in self.db.get_chapters_for_manga(manga_id):
@@ -475,7 +485,7 @@ class Library:
             language = ch['language'] if is_mangadex else None
             # A copy left in an old download location doesn't count - only the current folder does.
             stored = ch['file_path'] or ''
-            path = stored if stored and self._inside(stored, folder) and os.path.exists(stored) else None
+            path = stored if stored and self._inside(stored, folder) and exists(stored) else None
             disk_key = ((language or 'en').lower() if is_mangadex else None, self._norm(number))
             path = path or on_disk.get(disk_key)
             moved = bool(path) and os.path.normcase(os.path.normpath(path)) != os.path.normcase(os.path.normpath(stored))
@@ -581,11 +591,15 @@ class Library:
         return done
 
     def sync_all(self) -> None:
-        for manga in self.db.get_manga_list():
+        def sync(manga):
             try:
                 self.sync_files(manga['id'])
             except Exception as e:
                 logging.error(f"Sync failed for {manga.get('title')}: {e}")
+
+        # Listing a folder on a network share takes a moment each - do several at once.
+        with ThreadPoolExecutor(max_workers=SYNC_WORKERS, thread_name_prefix='sync') as pool:
+            list(pool.map(sync, self.db.get_manga_list()))
 
     # ---------------------------------------------------------------- covers
     def download_cover(self, cover_url: str, title: str) -> str:

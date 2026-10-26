@@ -196,6 +196,8 @@ class MainWindow(QMainWindow):
             core.library.sync_all()
             return True
 
+        # Show the library (and its new-chapter badge) right away; the sync only corrects it afterwards.
+        self.library.reload()
         run_async(initial_sync, lambda _ok: self.library.reload(), lambda _e: self.library.reload())
 
     # ------------------------------------------------------------- panel
