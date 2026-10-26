@@ -1,6 +1,8 @@
 """
-Download queue. One worker thread processes jobs (one job = one manga with a
-list of chapters) in order. Everything the UI needs to know is published on
+Download queue. Worker threads process jobs (one job = one manga with a list of
+chapters) in order - one at a time, or up to MAX_WORKERS side by side with parallel
+downloads on. In the safe mode a worker only takes a job from a site that nothing
+else is downloading from right now. Everything the UI needs to know is published on
 the EventBus:
 
     queue_changed       ()                                   jobs added/removed/status changed
@@ -106,6 +108,9 @@ class Job:
 # Chapters after the current one that sites with slow page servers may start loading.
 READ_AHEAD = 3
 
+MAX_WORKERS = 4
+PARALLEL_SAFE, PARALLEL_REGULAR = 'safe', 'regular'
+
 
 class DownloadManager:
     def __init__(self, library: Library, settings, bus: EventBus):
@@ -122,7 +127,8 @@ class DownloadManager:
         self._storage_root = ''      # folder the current/blocked job saves to (novels may have their own)
         self._save_lock = threading.Lock()
         self.queue_file = os.path.join(data_dir(), 'queue.json')
-        self._thread = threading.Thread(target=self._run, name="downloader", daemon=True)
+        self._threads = [threading.Thread(target=self._run, name=f"downloader-{n + 1}", daemon=True)
+                         for n in range(MAX_WORKERS)]
         bus.on('queue_changed', self.save_queue)     # keep the saved queue current (also survives crashes)
 
 # Lifecycle: start() is called when the app starts, shutdown() when it is closing. The queue is saved
@@ -130,8 +136,9 @@ class DownloadManager:
 # so the worker can finish the current chapter and save the queue before the app exits
     def start(self) -> None:
         self.restore_queue()
-        if not self._thread.is_alive():
-            self._thread.start()
+        for thread in self._threads:
+            if not thread.is_alive():
+                thread.start()
 
     def shutdown(self) -> None:
         """Stop the worker. Call save_queue()/prepare_shutdown() first - nothing is saved here."""
@@ -154,6 +161,18 @@ class DownloadManager:
             self._wake.notify_all()
         self.save_queue()
         self.bus.emit('queue_changed')
+
+    def worker_limit(self) -> int:
+        """How many jobs may run at once (download.parallel, 1 = one after another)."""
+        try:
+            return min(MAX_WORKERS, max(1, int(self.settings.get('download.parallel', 1))))
+        except (TypeError, ValueError):
+            return 1
+
+    def settings_changed(self) -> None:
+        """Parallel settings changed - idle workers look at the queue again."""
+        with self._lock:
+            self._wake.notify_all()
 
     def is_busy(self) -> bool:
         """True while a chapter is still being downloaded."""
@@ -427,6 +446,8 @@ class DownloadManager:
                             self._emit_chapter(job, ref)
             self.bus.emit('queue_changed')
             self.bus.emit('job_progress', job.id)
+            with self._lock:
+                self._wake.notify_all()      # a slot (and maybe a site) is free for the other workers
             if job.finished:
                 self.bus.emit('job_finished', job.id, job.status)
                 self._announce_finished(job)
@@ -434,7 +455,17 @@ class DownloadManager:
     def _next_job(self) -> Optional[Job]:
         if self._draining or self._storage:
             return None
-        return next((j for j in self._jobs if j.status == JOB_QUEUED and not j.paused and not j.cancelled), None)
+        running = [j for j in self._jobs if j.status == JOB_RUNNING]
+        limit = self.worker_limit()
+        if len(running) >= limit:
+            return None
+        # Safe: never two downloads from the same site at once - hammering one site from
+        # several connections is what gets an IP banned. Skip ahead to another site instead.
+        busy = set()
+        if limit > 1 and self.settings.get('download.parallel_mode', PARALLEL_SAFE) != PARALLEL_REGULAR:
+            busy = {j.site_type for j in running}
+        return next((j for j in self._jobs if j.status == JOB_QUEUED and not j.paused and not j.cancelled
+                     and j.site_type not in busy), None)
 
     def _process(self, job: Job) -> None:
         key, site = self.library.resolve(job.url)

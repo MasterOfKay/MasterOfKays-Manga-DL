@@ -17,6 +17,42 @@ from datetime import datetime
 from .base import ComicSiteBase, MangaMetadata, ChapterInfo, ChapterUnavailable, StorageUnavailable, save_file
 
 
+BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
+
+
+def _netmarble_pages(url: str) -> List[Tuple[str, List[str]]]:
+    """Images of a Netmarble forum post (Solo Leveling: Arise publishes its official chapters there).
+    The page itself is empty HTML; the post comes from the forum's JSON API."""
+    match = re.search(r'forum\.netmarble\.com/([^/]+)/view/(\d+)/(\d+)', url)
+    if not match:
+        raise ChapterUnavailable(f"Unrecognised Netmarble forum link: {url}")
+    forum_id, menu, article = match.groups()
+    headers = {'User-Agent': BROWSER_UA, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}
+    page = requests.get(f"https://forum.netmarble.com/{forum_id}/view/{menu}/{article}", headers=headers, timeout=15)
+    page.raise_for_status()
+    forum = re.search(r'"id":"%s"[^}]*?"forumType":"([^"]+)"[^}]*?"gameCode":"([^"]+)"' % re.escape(forum_id), page.text)
+    if not forum:
+        raise RuntimeError("Couldn't read the Netmarble forum page")
+    forum_type, game = forum.groups()
+    api = f"https://forum.netmarble.com/api/game/{game}/{forum_type}/forum/{forum_id}/article/{article}"
+    response = requests.get(api, params={'menuSeq': menu, 'viewFlag': 'false'}, headers=headers,
+                            timeout=15, allow_redirects=False)
+    if response.status_code != 200:
+        raise RuntimeError(f"Netmarble forum answered {response.status_code}")
+    data = response.json()
+    if data.get('code') != 0:
+        raise ChapterUnavailable(f"Netmarble forum: {data.get('msg') or 'post not available'}")
+    body = next((v for v in (data.get('article') or {}).values() if isinstance(v, str) and '<img' in v), '')
+    pages = []
+    for n, src in enumerate(re.findall(r'<img[^>]+src="([^"]+)"', body), start=1):
+        src = src.replace('&amp;', '&')
+        ext = os.path.splitext(urlparse(src).path)[1] or '.jpg'
+        # The post shows a re-compressed copy; the original sits next to it, same size, better quality.
+        original = re.sub(r'/thumbnail/(.+)_d(\.\w+)$', r'/\g<1>\g<2>', src)
+        pages.append((f"{n:03d}{ext}", [original, src] if original != src else [src]))
+    return pages
+
+
 class MangaDexDownloader(ComicSiteBase):
     """MangaDex manga downloader wi            # Try to get actual metadata from AP            # Try to get actual metadata from API if            # Create ComicInfo.xml
             if not os.path.exists(comic_info_path):
@@ -424,8 +460,13 @@ class MangaDexDownloader(ComicSiteBase):
             base_url = at_home_data['baseUrl']
             chapter_hash = at_home_data['chapter']['hash']
             data_pages = at_home_data['chapter']['data']  # High quality pages
-            
-            if not data_pages:
+
+            # (file name, urls to try in order) - official chapters only link to the publisher's site
+            if data_pages:
+                pages = [(name, [f"{base_url}/data/{chapter_hash}/{name}"]) for name in data_pages]
+            else:
+                pages = self._external_pages(chapter_id)
+            if not pages:
                 return {"success": False, "error": "No pages found for this chapter"}
             
             manga_path = self.get_safe_manga_path(manga_name, base_path)
@@ -460,9 +501,9 @@ class MangaDexDownloader(ComicSiteBase):
                 return {"success": True, "path": cbz_path, "message": "File already exists"}
             
             downloaded_images = []
-            total_pages = len(data_pages)
+            total_pages = len(pages)
             
-            for i, page_filename in enumerate(data_pages):
+            for i, (page_filename, page_urls) in enumerate(pages):
                 if pause_check:
                     while pause_check():
                         if cancel_check and cancel_check():
@@ -475,14 +516,10 @@ class MangaDexDownloader(ComicSiteBase):
                 if progress_callback:
                     progress_callback(i + 1, total_pages, f"Downloading page {i + 1}/{total_pages}")
                 
-                page_url = f"{base_url}/data/{chapter_hash}/{page_filename}"
-                
                 # A missing page fails the chapter (it is retried) instead of saving an incomplete file.
                 for attempt in range(3):
                     try:
-                        page_response = self._session.get(page_url, timeout=30)
-                        page_response.raise_for_status()
-                        downloaded_images.append((page_filename, page_response.content))
+                        downloaded_images.append((page_filename, self._get_page(page_urls)))
                         break
                     except requests.RequestException as e:
                         if attempt == 2:
@@ -510,6 +547,29 @@ class MangaDexDownloader(ComicSiteBase):
             print(error_msg)
             return {"success": False, "error": error_msg}
     
+    def _get_page(self, urls: List[str]) -> bytes:
+        """First url that works; the later ones are fallbacks."""
+        for n, url in enumerate(urls):
+            headers = {} if 'mangadex' in url else {'User-Agent': BROWSER_UA, 'Accept': '*/*'}
+            response = self._session.get(url, timeout=30, headers=headers)
+            if response.ok or n == len(urls) - 1:
+                response.raise_for_status()
+                return response.content
+        raise requests.RequestException("no page url")
+
+    def _external_pages(self, chapter_id: str) -> List[Tuple[str, List[str]]]:
+        """Pages of an official chapter that MangaDex only links to (externalUrl)."""
+        response = self._session.get(f"{self.api_base}/chapter/{chapter_id}", timeout=15)
+        response.raise_for_status()
+        external = (response.json().get('data', {}).get('attributes', {}) or {}).get('externalUrl') or ''
+        if not external:
+            return []
+        if 'forum.netmarble.com' in external:
+            return _netmarble_pages(external)
+        host = urlparse(external).netloc.replace('www.', '') or 'another site'
+        raise ChapterUnavailable(f"MangaDex doesn't host this chapter, it only links to the official "
+                                 f"release on {host}: {external}")
+
     def _extract_chapter_id(self, chapter_url: str) -> Optional[str]:
         """Extract chapter ID from MangaDex chapter URL or return ID if already extracted."""
         if re.match(r'^[a-f0-9\-]{36}$', chapter_url):

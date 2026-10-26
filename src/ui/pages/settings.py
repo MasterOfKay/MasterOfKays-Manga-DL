@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QButtonGroup, QComboBox, QHBoxLayout, QPushButton
                                QVBoxLayout, QWidget)
 
 from ...core import AppCore
+from ...core.downloads import MAX_WORKERS, PARALLEL_REGULAR, PARALLEL_SAFE
 from ...core.metadata_files import PRESETS
 from ...core.paths import data_dir
 from .. import theme
@@ -94,8 +95,33 @@ class SettingsPage(QWidget):
         retries.setValue(self.s.get_retry_attempts())
         retries.setFixedWidth(80)
         retries.valueChanged.connect(lambda v: self._set('download.retry_attempts', v))
-        self._row(box, card, 'Retries per chapter', 'How often a failed chapter is retried before giving up.', retries,
-                  last=True)
+        self._row(box, card, 'Retries per chapter', 'How often a failed chapter is retried before giving up.', retries)
+
+        parallel = QSpinBox(card)
+        parallel.setRange(1, MAX_WORKERS)
+        parallel.setValue(self.core.downloads.worker_limit())
+        parallel.setFixedWidth(80)
+        self._row(box, card, 'Parallel downloads',
+                  'How many series download at the same time. 1 downloads them one after another.', parallel)
+        parallel_mode = Segmented([(PARALLEL_SAFE, 'Safe'), (PARALLEL_REGULAR, 'Regular')],
+                                  self.s.get('download.parallel_mode', PARALLEL_SAFE), card)
+        self._row(box, card, 'Parallel mode',
+                  'Safe never downloads two series from the same site at once. It skips ahead in the queue to '
+                  'a series from another site, so fewer downloads may run than set. Regular just takes the next '
+                  'one in line. That is at your own risk: some sites ban your IP for hours or days when they '
+                  'get too many downloads at once.', parallel_mode, last=True)
+        parallel_mode.setEnabled(parallel.value() > 1)
+
+        def set_parallel(value):
+            self._set('download.parallel', value)
+            parallel_mode.setEnabled(value > 1)
+            self.core.downloads.settings_changed()
+
+        def set_parallel_mode(mode):
+            self._set('download.parallel_mode', mode)
+            self.core.downloads.settings_changed()
+        parallel.valueChanged.connect(set_parallel)
+        parallel_mode.changed.connect(set_parallel_mode)
 
         # --------------------------------------------------------- novels
         from ...core.models import NOVEL_FORMATS

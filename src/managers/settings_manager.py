@@ -20,6 +20,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     },
     'download': {
         'retry_attempts': 2,
+        'parallel': 1,               # series downloading at once (1-4)
+        'parallel_mode': 'safe',     # safe: never two from the same site at once | regular: plain queue order
         'save_cover': True,
         'save_comicinfo': True,
         'save_series_json': True,
